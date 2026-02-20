@@ -36,7 +36,7 @@ import {
   Mic,
   Cpu
 } from 'lucide-react-native';
-import { useAuth } from "../../context/authContext.jsx"
+import { useAuth } from '@/contexts/AuthContext';
 
 const { width } = Dimensions.get('window');
 
@@ -58,49 +58,40 @@ const LANGUAGES = [
   { code: 'AR', label: 'Arabic', flag: '🇸🇦' }
 ];
 
-// Cross-platform alert: works on web (window.alert) and native (Alert.alert)
-const showAlert = (title: string, message: string) => {
-  if (Platform.OS === 'web' && typeof window !== 'undefined') {
-    window.alert(`${title}\n\n${message}`);
+// Cross-platform alert (Alert.alert doesn't work on web)
+function showAlert(title: string, message: string, onOk?: () => void) {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.alert) {
+      window.alert(`${title}\n\n${message}`);
+      onOk?.();
+    } else {
+      onOk?.();
+    }
   } else {
-    Alert.alert(title, message);
+    Alert.alert(title, message, onOk ? [{ text: 'OK', onPress: onOk }] : undefined);
   }
-};
+}
 
 // --- AUTH SCREEN ---
-const AuthScreen = () => {
+const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
+  const { signIn, signUp, isLoading } = useAuth();
   const [isLogin, setIsLogin] = useState(true);
-  const [data, setData] = useState({ id: '', password: '' });
-  const [submitting, setSubmitting] = useState(false);
-  const { login, register } = useAuth();
+  const [data, setData] = useState({ userId: '', password: '' });
 
   const submit = async () => {
-    if (!data.id?.trim() || !data.password?.trim()) {
-      showAlert('Error', 'ID and Password required');
+    if (!data.userId.trim() || !data.password) {
+      showAlert('Error', 'User ID and Password required');
       return;
     }
-
-    setSubmitting(true);
-    const userId = data.id.trim();
-    const password = data.password;
-
-    if (isLogin) {
-      const result = await login(userId, password);
-      setSubmitting(false);
-      if (result?.success) return;
-      showAlert('Error', result?.message || 'Login failed');
-      setData(prev => ({ ...prev, password: '' }));
+    const result = isLogin
+      ? await signIn(data.userId.trim(), data.password)
+      : await signUp(data.userId.trim(), data.password);
+    if (result.success) {
+      if (isLogin) onSuccess();
+      else showAlert('Success', 'Account created successfully. You can now sign in.', () => setIsLogin(true));
     } else {
-      const result = await register(userId, password);
-      setSubmitting(false);
-      if (result?.success) {
-        showAlert('Success', 'Account created. Please sign in.');
-        setIsLogin(true);
-        // setData(prev => ({ ...prev, password: '' }));
-        return;
-      }
-      showAlert('Error', result?.message || 'Registration failed');
-      setData(prev => ({ ...prev, password: '' }));
+      const errorMessage = result.message || (isLogin ? 'Invalid credentials. Please try again.' : 'Sign up failed. Please try again.');
+      showAlert(isLogin ? 'Sign In Failed' : 'Error', errorMessage);
     }
   };
 
@@ -123,7 +114,8 @@ const AuthScreen = () => {
               placeholder="User ID"
               placeholderTextColor={THEME.textMuted}
               style={styles.fieldInput}
-              onChangeText={v => setData({ ...data, id: v })}
+              value={data.userId}
+              onChangeText={v => setData({ ...data, userId: v })}
             />
           </View>
           <View style={styles.field}>
@@ -136,9 +128,9 @@ const AuthScreen = () => {
               onChangeText={v => setData({ ...data, password: v })}
             />
           </View>
-          <TouchableOpacity style={styles.primaryBtn} onPress={submit}>
+          <TouchableOpacity style={styles.primaryBtn} onPress={submit} disabled={isLoading}>
             <LinearGradient colors={[THEME.primary, THEME.secondary]} style={styles.primaryBtnInner}>
-              {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>{isLogin ? 'Sign In' : 'Register'}</Text>}
+              {isLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>{isLogin ? 'Sign In' : 'Sign Up'}</Text>}
             </LinearGradient>
           </TouchableOpacity>
         </View>
@@ -150,20 +142,16 @@ const AuthScreen = () => {
   );
 };
 
-// --- HOME SCREEN --- (user from authContext)
-const HomeScreen = ({ device, setScreen }: any) => {
-  const { user } = useAuth();
-  const displayName = user?.name || user?.userId || '';
-  const displayId = user?.userId || user?.id || '';
-  return (
+// --- HOME SCREEN ---
+const HomeScreen = ({ user, device, setScreen }: any) => (
   <View style={styles.homePage}>
     <LinearGradient colors={[THEME.surface, THEME.background]} style={styles.headerBg} />
     <SafeAreaView>
       <View style={styles.headerRow}>
         <View>
           <Text style={styles.headerLabel}>AUTHENTICATED AS</Text>
-          <Text style={styles.headerName}>{displayName}</Text>
-          <Text style={styles.headerId}>ID: {displayId}</Text>
+          <Text style={styles.headerName}>{user?.name}</Text>
+          <Text style={styles.headerId}>ID: {user?.userId}</Text>
         </View>
         <TouchableOpacity onPress={() => setScreen('bt')} style={[styles.btButton, device && styles.btButtonActive]}>
           <Bluetooth size={26} color={device ? THEME.primary : THEME.textMuted} />
@@ -201,43 +189,11 @@ const HomeScreen = ({ device, setScreen }: any) => {
       </View>
     </ScrollView>
   </View>
-  );
-};
-
-// --- PROFILE SCREEN --- (credentials from authContext)
-const ProfileScreen = ({ onBack, onLogout }: { onBack: () => void; onLogout: () => void }) => {
-  const { user } = useAuth();
-  const displayName = user?.name || user?.userId || '';
-  const displayId = user?.userId || user?.id || '';
-  const initial = (displayName || displayId || '?').charAt(0).toUpperCase();
-  return (
-    <SafeAreaView style={styles.darkPage}>
-      <View style={styles.navHeader}>
-        <TouchableOpacity style={styles.backBtn} onPress={onBack}><ChevronLeft size={26} color={THEME.textMain} /></TouchableOpacity>
-        <Text style={styles.navTitle}>Profile</Text>
-        <View style={{ width: 40 }} />
-      </View>
-      <View style={{ padding: 20 }}>
-        <View style={styles.profileBox}>
-          <View style={styles.profileAvatar}>
-            <Text style={styles.profileLetter}>{initial}</Text>
-          </View>
-          <View>
-            <Text style={styles.profileName}>{displayName}</Text>
-            <Text style={styles.profileId}>ID: {displayId}</Text>
-          </View>
-        </View>
-        <TouchableOpacity style={styles.logoutBtn} onPress={onLogout}>
-          <LogOut size={18} color={THEME.danger} /><Text style={styles.logoutText}>Sign Out</Text>
-        </TouchableOpacity>
-      </View>
-    </SafeAreaView>
-  );
-};
+);
 
 export default function App() {
-  const { user, loading: authLoading, logout } = useAuth();
-  const [screen, setScreen] = useState('home');
+  const { user, logout } = useAuth();
+  const [screen, setScreen] = useState(user ? 'home' : 'auth');
   const [device, setDevice] = useState(null);
   const [speakLang, setSpeakLang] = useState('UR');
   const [hearLang, setHearLang] = useState('EN');
@@ -254,8 +210,7 @@ export default function App() {
     </View>
   );
 
-  if (!user && !authLoading) return <AuthScreen />;
-  if (authLoading) return <View style={[styles.darkPage, { justifyContent: 'center', alignItems: 'center' }]}><ActivityIndicator size="large" color={THEME.primary} /></View>;
+  if (!user) return <AuthScreen onSuccess={() => setScreen('home')} />;
 
   if (screen.includes('active')) return (
     <View style={styles.livePage}>
@@ -292,7 +247,7 @@ export default function App() {
   return (
     <View style={{ flex: 1, backgroundColor: THEME.background }}>
       <StatusBar barStyle="light-content" />
-      {screen === 'home' && <HomeScreen device={device} setScreen={setScreen} />}
+      {screen === 'home' && <HomeScreen user={user} device={device} setScreen={setScreen} />}
 
       {screen.includes('setup') && (
         <SafeAreaView style={styles.darkPage}>
@@ -346,9 +301,9 @@ export default function App() {
                   style={styles.launchBtn} 
                   onPress={() => {
                     // Logic to split the IDs for the active screen
-                    const ids = participantIds.split(',').map(id => id.trim()).filter(id => id !== '');
+                    const ids = participantIds.split(',').map((id: string) => id.trim()).filter((id: string) => id !== '');
                     const config = [{ userId: 'You', speak: speakLang, hear: hearLang }];
-                    ids.forEach(id => config.push({ userId: id, speak: hearLang, hear: speakLang }));
+                    ids.forEach((id: string) => config.push({ userId: id, speak: hearLang, hear: speakLang }));
                     setActiveConfig(config);
                     setScreen('active');
                   }}
@@ -369,7 +324,7 @@ export default function App() {
         </SafeAreaView>
       )}
       {screen === 'history' && <SafeAreaView style={styles.darkPage}><Header title="Logs" /><ScrollView style={{ padding: 20 }}><View style={styles.historyItem}><View><Text style={styles.historyTitle}>Team Briefing</Text><Text style={styles.historyDate}>Feb 3, 2026</Text></View><TouchableOpacity style={styles.playBox}><Play size={16} color={THEME.primary} /></TouchableOpacity></View></ScrollView></SafeAreaView>}
-      {screen === 'settings' && <ProfileScreen onBack={() => setScreen('home')} onLogout={() => { logout(); setScreen('home'); }} />}
+      {screen === 'settings' && <SafeAreaView style={styles.darkPage}><Header title="Profile" /><View style={{ padding: 20 }}><View style={styles.profileBox}><View style={styles.profileAvatar}><Text style={styles.profileLetter}>{user?.name?.charAt(0) ?? '?'}</Text></View><View><Text style={styles.profileName}>{user?.name}</Text><Text style={styles.profileId}>ID: {user?.userId}</Text></View></View><TouchableOpacity style={styles.logoutBtn} onPress={() => { logout(); setScreen('auth'); }}><LogOut size={18} color={THEME.danger} /><Text style={styles.logoutText}>Sign Out</Text></TouchableOpacity></View></SafeAreaView>}
     </View>
   );
 }
