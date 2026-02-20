@@ -9,7 +9,7 @@ export const AuthProvider = ({ children }) => {
   const [loginLoading, setLoginLoading] = useState(false);
 
   useEffect(() => {
-    const storedUser = localStorage.getItem("user");
+    const storedUser = sessionStorage.getItem("user");
     if (storedUser) {
       try {
         setUser(JSON.parse(storedUser));
@@ -30,7 +30,7 @@ export const AuthProvider = ({ children }) => {
 
       const userData = data.user || { userId, name: userId };
       setUser(userData);
-      localStorage.setItem("user", JSON.stringify(userData));
+      sessionStorage.setItem("user", JSON.stringify(userData));
       return { success: true };
     } catch (error) {
       const message = error.response?.data?.message || error.message || "Login failed";
@@ -56,7 +56,7 @@ export const AuthProvider = ({ children }) => {
 
   const logout = () => {
     setUser(null);
-    localStorage.removeItem("user");
+    sessionStorage.removeItem("user");
   };
 
   const value = {
