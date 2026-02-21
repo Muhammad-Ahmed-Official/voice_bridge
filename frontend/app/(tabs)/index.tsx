@@ -127,8 +127,8 @@ const HomeScreen = ({ user, device, setScreen }: any) => (
 );
 
 export default function App() {
-  const { user, logout } = useAuth();
-  const [screen, setScreen] = useState(user ? 'home' : 'auth');
+  const { user, logout, isInitialized } = useAuth();
+  const [screen, setScreen] = useState('home');
   const [device, setDevice] = useState(null);
   const [speakLang, setSpeakLang] = useState('UR');
   const [hearLang, setHearLang] = useState('EN');
@@ -188,6 +188,13 @@ export default function App() {
     </View>
   );
 
+  if (!isInitialized) {
+    return (
+      <View style={[styles.darkPage, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color={THEME.primary} />
+      </View>
+    );
+  }
   if (!user) return <AuthScreen onSuccess={() => setScreen('home')} />;
 
   if (screen.includes('active')) return (
