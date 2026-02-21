@@ -1,40 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  StyleSheet,
-  Text,
-  View,
-  TextInput,
-  TouchableOpacity,
-  ScrollView,
-  StatusBar,
-  ActivityIndicator,
-  Dimensions,
-  Alert,
-  Platform
+  StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView,
+  StatusBar, ActivityIndicator, Dimensions, Alert, Platform
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  Globe,
-  User,
-  Key,
-  ChevronLeft,
-  Bluetooth,
-  Settings,
-  FileText,
-  Headphones,
-  PhoneCall,
-  Users,
-  Check,
-  Zap,
-  Activity,
-  MicOff,
-  Volume2,
-  Play,
-  LogOut,
-  Wifi,
-  Mic,
-  Cpu
+  Globe, User, Key, ChevronLeft, Bluetooth, Settings, FileText,
+  Headphones, PhoneCall, Users, Check, Zap, Activity, MicOff,
+  Volume2, Play, LogOut, Wifi, Mic, Cpu, VolumeX, Circle
 } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -58,15 +32,19 @@ const LANGUAGES = [
   { code: 'AR', label: 'Arabic', flag: '🇸🇦' }
 ];
 
-// Cross-platform alert (Alert.alert doesn't work on web)
+// Dummy phrases for transcription
+const DUMMY_TRANSCRIPTS = [
+  "Hello, I am joining the bridge.",
+  "Translation is processing in real-time.",
+  "Assalam-o-Alaikum, kaise hain aap?",
+  "The voice cloning quality is impressive.",
+  "System is now connected to the meeting table."
+];
+
 function showAlert(title: string, message: string, onOk?: () => void) {
   if (Platform.OS === 'web') {
-    if (typeof window !== 'undefined' && window.alert) {
-      window.alert(`${title}\n\n${message}`);
-      onOk?.();
-    } else {
-      onOk?.();
-    }
+    window.alert(`${title}\n\n${message}`);
+    onOk?.();
   } else {
     Alert.alert(title, message, onOk ? [{ text: 'OK', onPress: onOk }] : undefined);
   }
@@ -88,10 +66,9 @@ const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
       : await signUp(data.userId.trim(), data.password);
     if (result.success) {
       if (isLogin) onSuccess();
-      else showAlert('Success', 'Account created successfully. You can now sign in.', () => setIsLogin(true));
+      else showAlert('Success', 'Account created successfully.', () => setIsLogin(true));
     } else {
-      const errorMessage = result.message || (isLogin ? 'Invalid credentials. Please try again.' : 'Sign up failed. Please try again.');
-      showAlert(isLogin ? 'Sign In Failed' : 'Error', errorMessage);
+      showAlert('Error', result.message || 'Action failed');
     }
   };
 
@@ -106,37 +83,16 @@ const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
           <Text style={styles.brand}>Voice Bridge</Text>
           <Text style={styles.tagline}>Breaking Barriers, Building Bridges</Text>
         </View>
-
         <View style={styles.authCard}>
-          <View style={styles.field}>
-            <User size={18} color={THEME.textMuted} />
-            <TextInput
-              placeholder="User ID"
-              placeholderTextColor={THEME.textMuted}
-              style={styles.fieldInput}
-              value={data.userId}
-              onChangeText={v => setData({ ...data, userId: v })}
-            />
-          </View>
-          <View style={styles.field}>
-            <Key size={18} color={THEME.textMuted} />
-            <TextInput
-              secureTextEntry
-              placeholder="Password"
-              placeholderTextColor={THEME.textMuted}
-              style={styles.fieldInput}
-              onChangeText={v => setData({ ...data, password: v })}
-            />
-          </View>
+          <View style={styles.field}><User size={18} color={THEME.textMuted} /><TextInput placeholder="User ID" placeholderTextColor={THEME.textMuted} style={styles.fieldInput} value={data.userId} onChangeText={v => setData({ ...data, userId: v })} /></View>
+          <View style={styles.field}><Key size={18} color={THEME.textMuted} /><TextInput secureTextEntry placeholder="Password" placeholderTextColor={THEME.textMuted} style={styles.fieldInput} onChangeText={v => setData({ ...data, password: v })} /></View>
           <TouchableOpacity style={styles.primaryBtn} onPress={submit} disabled={isLoading}>
             <LinearGradient colors={[THEME.primary, THEME.secondary]} style={styles.primaryBtnInner}>
               {isLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>{isLogin ? 'Sign In' : 'Sign Up'}</Text>}
             </LinearGradient>
           </TouchableOpacity>
         </View>
-        <TouchableOpacity onPress={() => setIsLogin(!isLogin)} style={styles.switchBox}>
-          <Text style={styles.switchText}>{isLogin ? 'New user? Create account' : 'Already have an account? Sign in'}</Text>
-        </TouchableOpacity>
+        <TouchableOpacity onPress={() => setIsLogin(!isLogin)} style={styles.switchBox}><Text style={styles.switchText}>{isLogin ? 'New user? Create account' : 'Already have an account? Sign in'}</Text></TouchableOpacity>
       </SafeAreaView>
     </View>
   );
@@ -148,24 +104,12 @@ const HomeScreen = ({ user, device, setScreen }: any) => (
     <LinearGradient colors={[THEME.surface, THEME.background]} style={styles.headerBg} />
     <SafeAreaView>
       <View style={styles.headerRow}>
-        <View>
-          <Text style={styles.headerLabel}>AUTHENTICATED AS</Text>
-          <Text style={styles.headerName}>{user?.name}</Text>
-          <Text style={styles.headerId}>ID: {user?.userId}</Text>
-        </View>
-        <TouchableOpacity onPress={() => setScreen('bt')} style={[styles.btButton, device && styles.btButtonActive]}>
-          <Bluetooth size={26} color={device ? THEME.primary : THEME.textMuted} />
-        </TouchableOpacity>
+        <View><Text style={styles.headerLabel}>AUTHENTICATED AS</Text><Text style={styles.headerName}>{user?.name}</Text><Text style={styles.headerId}>ID: {user?.userId}</Text></View>
+        <TouchableOpacity onPress={() => setScreen('bt')} style={[styles.btButton, device && styles.btButtonActive]}><Bluetooth size={26} color={device ? THEME.primary : THEME.textMuted} /></TouchableOpacity>
       </View>
       <View style={styles.headerIcons}>
-        <TouchableOpacity style={styles.headerIconBox} onPress={() => setScreen('history')}>
-          <FileText size={18} color={THEME.primary} />
-          <Text style={styles.headerIconLabel}>History</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.headerIconBox} onPress={() => setScreen('settings')}>
-          <Settings size={18} color={THEME.secondary} />
-          <Text style={styles.headerIconLabel}>Settings</Text>
-        </TouchableOpacity>
+        <TouchableOpacity style={styles.headerIconBox} onPress={() => setScreen('history')}><FileText size={18} color={THEME.primary} /><Text style={styles.headerIconLabel}>History</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.headerIconBox} onPress={() => setScreen('settings')}><Settings size={18} color={THEME.secondary} /><Text style={styles.headerIconLabel}>Settings</Text></TouchableOpacity>
       </View>
     </SafeAreaView>
     <ScrollView contentContainerStyle={{ padding: 20 }}>
@@ -176,16 +120,8 @@ const HomeScreen = ({ user, device, setScreen }: any) => (
         <Text style={styles.featureDesc}>Real-time background translation. Works with external call apps.</Text>
       </TouchableOpacity>
       <View style={styles.gridRow}>
-        <TouchableOpacity style={styles.gridCard} onPress={() => setScreen('dc-setup')}>
-          <View style={[styles.gridIcon, { backgroundColor: 'rgba(16, 185, 129, 0.1)' }]}><PhoneCall size={24} color={THEME.success} /></View>
-          <Text style={styles.gridTitle}>Direct Call</Text>
-          <Text style={styles.gridDesc}>1-on-1 ID Search</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.gridCard} onPress={() => setScreen('mt-setup')}>
-          <View style={[styles.gridIcon, { backgroundColor: 'rgba(99, 102, 241, 0.1)' }]}><Users size={24} color={THEME.secondary} /></View>
-          <Text style={styles.gridTitle}>Meeting Table</Text>
-          <Text style={styles.gridDesc}>Group 3-5 Users</Text>
-        </TouchableOpacity>
+        <TouchableOpacity style={styles.gridCard} onPress={() => setScreen('dc-setup')}><View style={[styles.gridIcon, { backgroundColor: 'rgba(16, 185, 129, 0.1)' }]}><PhoneCall size={24} color={THEME.success} /></View><Text style={styles.gridTitle}>Direct Call</Text><Text style={styles.gridDesc}>1-on-1 ID Search</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.gridCard} onPress={() => setScreen('mt-setup')}><View style={[styles.gridIcon, { backgroundColor: 'rgba(99, 102, 241, 0.1)' }]}><Users size={24} color={THEME.secondary} /></View><Text style={styles.gridTitle}>Meeting Table</Text><Text style={styles.gridDesc}>Group 3-5 Users</Text></TouchableOpacity>
       </View>
     </ScrollView>
   </View>
@@ -199,8 +135,41 @@ export default function App() {
   const [hearLang, setHearLang] = useState('EN');
   const [participants, setParticipants] = useState(3);
   const [cloningEnabled, setCloningEnabled] = useState(false);
-  const [participantIds, setParticipantIds] = useState(''); // State for comma separated IDs
+  const [participantIds, setParticipantIds] = useState('');
   const [activeConfig, setActiveConfig] = useState<any>(null);
+
+  // --- NEW STATES FOR CALL FUNCTIONALITY ---
+  const [isMuted, setIsMuted] = useState(false);
+  const [isSpeaker, setIsSpeaker] = useState(true);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [liveTranscript, setLiveTranscript] = useState<Record<number, string>>({});
+
+  // Timer and Transcription Logic
+  useEffect(() => {
+    let interval: any;
+    if (screen.includes('active')) {
+      interval = setInterval(() => {
+        setRecordingSeconds(prev => prev + 1);
+        
+        // Randomly update transcripts for participants
+        const randomIdx = Math.floor(Math.random() * (activeConfig?.length || 1));
+        const randomText = DUMMY_TRANSCRIPTS[Math.floor(Math.random() * DUMMY_TRANSCRIPTS.length)];
+        setLiveTranscript(prev => ({ ...prev, [randomIdx]: randomText }));
+      }, 3000);
+    } else {
+      setRecordingSeconds(0);
+      setLiveTranscript({});
+      setIsMuted(false);
+      setIsSpeaker(true);
+    }
+    return () => clearInterval(interval);
+  }, [screen]);
+
+  const formatTime = (totalSeconds: number) => {
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const Header = ({ title }: any) => (
     <View style={styles.navHeader}>
@@ -216,30 +185,66 @@ export default function App() {
     <View style={styles.livePage}>
       <StatusBar hidden />
       <View style={styles.liveTop}>
-        <View style={styles.timeBox}><Text style={styles.timeText}>12:45</Text></View>
+        {/* LIVE RECORDING INDICATOR */}
+        <View style={styles.recordingIndicator}>
+          <Circle size={10} color={THEME.danger} fill={THEME.danger} />
+          <Text style={styles.recText}>REC {formatTime(recordingSeconds)}</Text>
+        </View>
         <View style={{ alignItems: 'flex-end' }}>
           <Text style={styles.liveLabel}>● LIVE BRIDGE</Text>
           {cloningEnabled && <Text style={styles.cloningStatusLabel}>AI CLONE ACTIVE</Text>}
         </View>
       </View>
-      <View style={styles.participantsGrid}>
+
+      <ScrollView contentContainerStyle={styles.participantsGrid}>
         {activeConfig?.map((p: any, i: number) => (
           <View key={i} style={[styles.participantTile, i === 0 && styles.tileActive]}>
-            <View style={[styles.avatarBox, i === 0 && cloningEnabled && { backgroundColor: 'rgba(16, 185, 129, 0.2)' }]}>
-              {i === 0 && cloningEnabled ? <Mic size={24} color={THEME.success} /> : <Text style={styles.avatarLetter}>{p.userId?.charAt(0) || 'U'}</Text>}
+            <View style={styles.tileTopRow}>
+               <View style={[styles.avatarBox, i === 0 && cloningEnabled && { backgroundColor: 'rgba(16, 185, 129, 0.2)' }]}>
+                {i === 0 && cloningEnabled ? <Mic size={24} color={THEME.success} /> : <Text style={styles.avatarLetter}>{p.userId?.charAt(0) || 'U'}</Text>}
+              </View>
+              {/* Show mute icon if current user is muted */}
+              {i === 0 && isMuted && <MicOff size={16} color={THEME.danger} />}
             </View>
-            <View>
-              <Text style={styles.tileName}>{p.userId}</Text>
+           
+            <View style={styles.infoBox}>
+              <Text style={styles.tileName}>{i === 0 ? "You" : p.userId}</Text>
               <Text style={styles.tileLang}>{p.speak} ➜ {p.hear}</Text>
             </View>
+
+            {/* LIVE TRANSCRIPTION BOX */}
+            <View style={styles.transcriptContainer}>
+              <Text style={styles.transcriptText} numberOfLines={2}>
+                {liveTranscript[i] || "Waiting for audio..."}
+              </Text>
+            </View>
+
             <View style={styles.tileWave}><Activity size={16} color={i === 0 && cloningEnabled ? THEME.success : THEME.primary} /></View>
           </View>
         ))}
-      </View>
+      </ScrollView>
+
       <View style={styles.bottomControls}>
-        <TouchableOpacity style={styles.roundControl}><MicOff size={24} color={THEME.textMain} /></TouchableOpacity>
-        <TouchableOpacity onPress={() => setScreen('home')} style={[styles.roundControl, styles.endCall]}><PhoneCall size={26} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} /></TouchableOpacity>
-        <TouchableOpacity style={styles.roundControl}><Volume2 size={24} color={THEME.textMain} /></TouchableOpacity>
+        {/* MUTE TOGGLE */}
+        <TouchableOpacity 
+          style={[styles.roundControl, isMuted && { backgroundColor: 'rgba(244, 63, 94, 0.2)', borderColor: THEME.danger }]} 
+          onPress={() => setIsMuted(!isMuted)}
+        >
+          {isMuted ? <MicOff size={24} color={THEME.danger} /> : <Mic size={24} color={THEME.textMain} />}
+        </TouchableOpacity>
+
+        {/* END CALL */}
+        <TouchableOpacity onPress={() => setScreen('home')} style={[styles.roundControl, styles.endCall]}>
+          <PhoneCall size={26} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
+        </TouchableOpacity>
+
+        {/* SPEAKER TOGGLE */}
+        <TouchableOpacity 
+          style={[styles.roundControl, !isSpeaker && { opacity: 0.5 }]} 
+          onPress={() => setIsSpeaker(!isSpeaker)}
+        >
+          {isSpeaker ? <Volume2 size={24} color={THEME.primary} /> : <VolumeX size={24} color={THEME.textMuted} />}
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -257,9 +262,8 @@ export default function App() {
               <View style={styles.errorBox}><Bluetooth size={32} color={THEME.danger} /><Text style={styles.errorTitle}>Headset Required</Text><TouchableOpacity style={styles.errorBtn} onPress={() => setScreen('bt')}><Text style={styles.errorBtnText}>Pair Now</Text></TouchableOpacity></View>
             ) : (
               <>
-                {screen === 'dc-setup' && <View style={{ marginBottom: 25 }}><Text style={styles.labelDark}>REMOTE USER ID</Text><TextInput placeholder="Target ID" style={styles.inputWhite} placeholderTextColor={THEME.textMuted} /></View>}
+                {screen === 'dc-setup' && <View style={{ marginBottom: 25 }}><Text style={styles.labelDark}>REMOTE USER ID</Text><TextInput placeholder="Target ID" style={styles.inputWhite} placeholderTextColor={THEME.textMuted} onChangeText={setParticipantIds} /></View>}
                 
-                {/* RESTORED MEETING TABLE IDS INPUT */}
                 {screen === 'mt-setup' && (
                   <View style={{ marginBottom: 25 }}>
                     <Text style={styles.labelDark}>PARTICIPANTS COUNT</Text>
@@ -297,13 +301,36 @@ export default function App() {
                 <Text style={[styles.labelDark, { marginTop: 25 }]}>I WANT TO HEAR</Text>
                 <View style={styles.langRow}>{LANGUAGES.map(l => <TouchableOpacity key={'h' + l.code} onPress={() => setHearLang(l.code)} style={[styles.langSelect, hearLang === l.code && styles.langSelectActive]}><Text style={styles.flag}>{l.flag}</Text><Text style={[styles.langName, hearLang === l.code && styles.langNameActive]}>{l.label}</Text></TouchableOpacity>)}</View>
 
-                <TouchableOpacity 
+              <TouchableOpacity 
                   style={styles.launchBtn} 
                   onPress={() => {
-                    // Logic to split the IDs for the active screen
-                    const ids = participantIds.split(',').map((id: string) => id.trim()).filter((id: string) => id !== '');
-                    const config = [{ userId: 'You', speak: speakLang, hear: hearLang }];
-                    ids.forEach((id: string) => config.push({ userId: id, speak: hearLang, hear: speakLang }));
+                    let config = [];
+                    
+                    // 1. Aapka apna card (Hamesha pehla card)
+                    config.push({ userId: user.userId || 'You', speak: speakLang, hear: hearLang });
+
+                    if (screen === 'as-setup') {
+                     
+                      config.push({ userId: 'user', speak: hearLang, hear: speakLang });
+                    } 
+                    else if (screen === 'dc-setup') {
+                      
+                      const targetId = participantIds.trim() || 'Remote User';
+                      config.push({ userId: targetId, speak: hearLang, hear: speakLang });
+                    } 
+                    else if (screen === 'mt-setup') {
+                    
+                      const ids = participantIds.split(',').map(id => id.trim()).filter(id => id !== '');
+                      
+                      for (let i = 1; i < participants; i++) {
+                        config.push({ 
+                          userId: ids[i-1] || `User ${i + 1}`, 
+                          speak: hearLang, 
+                          hear: speakLang 
+                        });
+                      }
+                    }
+
                     setActiveConfig(config);
                     setScreen('active');
                   }}
@@ -316,14 +343,56 @@ export default function App() {
         </SafeAreaView>
       )}
 
-      {/* Rest of the screens (bt, history, settings) ... */}
       {screen === 'bt' && (
         <SafeAreaView style={styles.darkPage}>
           <Header title="Device Pairing" />
           <View style={styles.centerBox}><Bluetooth size={60} color={THEME.primary} /><Text style={styles.centerTitle}>Scanning...</Text><TouchableOpacity style={styles.scanOption} onPress={() => { setDevice('Galaxy Buds' as any); setScreen('home'); }}><Text style={styles.scanText}>Galaxy Buds Pro</Text><Check size={18} color={THEME.primary} /></TouchableOpacity></View>
         </SafeAreaView>
       )}
-      {screen === 'history' && <SafeAreaView style={styles.darkPage}><Header title="Logs" /><ScrollView style={{ padding: 20 }}><View style={styles.historyItem}><View><Text style={styles.historyTitle}>Team Briefing</Text><Text style={styles.historyDate}>Feb 3, 2026</Text></View><TouchableOpacity style={styles.playBox}><Play size={16} color={THEME.primary} /></TouchableOpacity></View></ScrollView></SafeAreaView>}
+      {screen === 'history' && (
+        <SafeAreaView style={styles.darkPage}>
+          <Header title="Call Logs & History" />
+          <ScrollView style={{ padding: 20 }}>
+            {/* Example History Card */}
+            <View style={styles.historyItem}>
+              <View style={styles.historyHeader}>
+                <View>
+                  <Text style={styles.historyTitle}>Team Strategy Session</Text>
+                  <Text style={styles.historyDate}>Feb 21, 2026 • 12:45 PM</Text>
+                </View>
+                <Activity size={20} color={THEME.primary} />
+              </View>
+
+              {/* Transcript Preview Section */}
+              <View style={styles.transcriptPreview}>
+                <Text style={styles.transcriptPreviewText} numberOfLines={2}>
+                  "The speech-to-speech bridge is working perfectly. Testing Urdu to English cloning..."
+                </Text>
+              </View>
+
+              {/* Action Buttons */}
+              <View style={styles.historyActions}>
+                {/* Play Recording */}
+                <TouchableOpacity style={[styles.actionBtn, styles.playBtn]} onPress={() => showAlert('Audio Player', 'Playing the recorded conversation...')}>
+                  <Play size={16} color={THEME.primary} />
+                  <Text style={styles.actionBtnText}>Play Audio</Text>
+                </TouchableOpacity>
+
+                {/* Save to PDF */}
+                <TouchableOpacity style={[styles.actionBtn, styles.pdfBtn]} onPress={() => showAlert('Export PDF', 'Transcript has been saved to your documents as PDF.')}>
+                  <FileText size={16} color={THEME.secondary} />
+                  <Text style={styles.actionBtnText}>Save PDF</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Placeholder for empty state if needed */}
+            <Text style={{ color: THEME.textMuted, textAlign: 'center', marginTop: 20, fontSize: 12 }}>
+              Only recent 50 calls are stored locally.
+            </Text>
+          </ScrollView>
+        </SafeAreaView>
+      )}
       {screen === 'settings' && <SafeAreaView style={styles.darkPage}><Header title="Profile" /><View style={{ padding: 20 }}><View style={styles.profileBox}><View style={styles.profileAvatar}><Text style={styles.profileLetter}>{user?.name?.charAt(0) ?? '?'}</Text></View><View><Text style={styles.profileName}>{user?.name}</Text><Text style={styles.profileId}>ID: {user?.userId}</Text></View></View><TouchableOpacity style={styles.logoutBtn} onPress={() => { logout(); setScreen('auth'); }}><LogOut size={18} color={THEME.danger} /><Text style={styles.logoutText}>Sign Out</Text></TouchableOpacity></View></SafeAreaView>}
     </View>
   );
@@ -408,17 +477,14 @@ const styles = StyleSheet.create({
   bottomControls: { backgroundColor: THEME.surface, height: 140, borderTopLeftRadius: 40, borderTopRightRadius: 40, flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', borderWidth: 1, borderColor: THEME.border },
   roundControl: { padding: 18, backgroundColor: THEME.background, borderRadius: 40, borderWidth: 1, borderColor: THEME.border },
   endCall: { backgroundColor: THEME.danger, borderColor: THEME.danger },
-  historyItem: { backgroundColor: THEME.surface, padding: 20, borderRadius: 20, marginBottom: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: THEME.border },
-  historyTitle: { color: THEME.textMain, fontSize: 16, fontWeight: '800' },
-  historyDate: { color: THEME.textMuted, fontSize: 12, marginTop: 6 },
   playBox: { padding: 12, backgroundColor: THEME.background, borderRadius: 14, borderWidth: 1, borderColor: THEME.border },
   profileBox: { backgroundColor: THEME.surface, padding: 20, borderRadius: 24, flexDirection: 'row', alignItems: 'center', gap: 16, borderWidth: 1, borderColor: THEME.border },
   profileAvatar: { width: 60, height: 60, borderRadius: 30, backgroundColor: THEME.background, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: THEME.border },
   profileLetter: { color: THEME.primary, fontSize: 22, fontWeight: '800' },
   profileName: { color: THEME.textMain, fontSize: 18, fontWeight: '800' },
   profileId: { color: THEME.textMuted, fontSize: 12 },
-  logoutBtn: { marginTop: 20, backgroundColor: 'rgba(244, 63, 94, 0.1)', padding: 20, borderRadius: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, borderWidth: 1, borderColor: 'rgba(244, 63, 94, 0.2)' },
-  logoutText: { color: THEME.danger, fontWeight: '800', fontSize: 15 },
+  logoutBtn: { marginTop: 20, backgroundColor: 'rgba(244, 63, 94, 0.1)', padding: 15, borderRadius: 15, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10 },
+  logoutText: { color: THEME.danger, fontWeight: '800' },
   cloningCard: { backgroundColor: THEME.surface, padding: 20, borderRadius: 24, flexDirection: 'row', alignItems: 'center', marginBottom: 25, borderWidth: 1, borderColor: THEME.border },
   cloningIconBox: { width: 48, height: 48, backgroundColor: THEME.background, borderRadius: 14, justifyContent: 'center', alignItems: 'center', marginRight: 16, borderWidth: 1, borderColor: THEME.border },
   cloningTitle: { color: THEME.textMain, fontWeight: '800', fontSize: 16 },
@@ -426,5 +492,22 @@ const styles = StyleSheet.create({
   toggleTrack: { width: 46, height: 24, borderRadius: 12, backgroundColor: THEME.background, padding: 3, borderWidth: 1, borderColor: THEME.border },
   toggleTrackActive: { backgroundColor: THEME.primary, borderColor: THEME.primary },
   toggleThumb: { width: 18, height: 18, borderRadius: 9, backgroundColor: THEME.textMuted },
-  toggleThumbActive: { alignSelf: 'flex-end', backgroundColor: '#fff' }
+  toggleThumbActive: { alignSelf: 'flex-end', backgroundColor: '#fff' },
+  recordingIndicator: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(0,0,0,0.3)', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 20 },
+  recText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  transcriptContainer: { backgroundColor: 'rgba(0,0,0,0.2)', padding: 8, borderRadius: 10, marginTop: 8, height: 45, justifyContent: 'center' },
+  transcriptText: { color: THEME.primary, fontSize: 10, fontStyle: 'italic' },
+  tileTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  infoBox: { marginTop: 4 },
+  historyItem: { backgroundColor: THEME.surface, padding: 18, borderRadius: 24, marginBottom: 16, borderWidth: 1, borderColor: THEME.border },
+  historyHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  historyTitle: { color: THEME.textMain, fontSize: 17, fontWeight: '800' },
+  historyDate: { color: THEME.textMuted, fontSize: 12, marginTop: 2 },
+  transcriptPreview: { backgroundColor: THEME.background, padding: 12, borderRadius: 14, marginBottom: 15, borderWidth: 1, borderColor: THEME.border },
+  transcriptPreviewText: { color: THEME.textMuted, fontSize: 12, fontStyle: 'italic', lineHeight: 18 },
+  historyActions: { flexDirection: 'row', gap: 10 },
+  actionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10, borderRadius: 12, borderWidth: 1 },
+  playBtn: { backgroundColor: 'rgba(6, 182, 212, 0.1)', borderColor: THEME.primary },
+  pdfBtn: { backgroundColor: 'rgba(99, 102, 241, 0.1)', borderColor: THEME.secondary },
+  actionBtnText: { color: THEME.textMain, fontSize: 12, fontWeight: '700' }
 });
