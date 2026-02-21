@@ -32,7 +32,6 @@ const LANGUAGES = [
   { code: 'AR', label: 'Arabic', flag: '🇸🇦' }
 ];
 
-// Dummy phrases for transcription
 const DUMMY_TRANSCRIPTS = [
   "Hello, I am joining the bridge.",
   "Translation is processing in real-time.",
@@ -143,15 +142,15 @@ export default function App() {
   const [isSpeaker, setIsSpeaker] = useState(true);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState<Record<number, string>>({});
+  
+  // State for Incoming Call Popup
+ const [incomingCall, setIncomingCall] = useState<{callerName: string, callerId: string} | null>(null);
 
-  // Timer and Transcription Logic
   useEffect(() => {
     let interval: any;
     if (screen.includes('active')) {
       interval = setInterval(() => {
         setRecordingSeconds(prev => prev + 1);
-        
-        // Randomly update transcripts for participants
         const randomIdx = Math.floor(Math.random() * (activeConfig?.length || 1));
         const randomText = DUMMY_TRANSCRIPTS[Math.floor(Math.random() * DUMMY_TRANSCRIPTS.length)];
         setLiveTranscript(prev => ({ ...prev, [randomIdx]: randomText }));
@@ -165,6 +164,16 @@ export default function App() {
     return () => clearInterval(interval);
   }, [screen]);
 
+  // Test effect to show popup after 5 seconds (Only for demo)
+  useEffect(() => {
+    if (user && screen === 'home') {
+      const timer = setTimeout(() => {
+        setIncomingCall({ callerName: 'Abdullah', callerId: 'abdullah_test' });
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [user, screen]);
+
   const formatTime = (totalSeconds: number) => {
     const mins = Math.floor(totalSeconds / 60);
     const secs = totalSeconds % 60;
@@ -175,7 +184,7 @@ export default function App() {
     <View style={styles.navHeader}>
       <TouchableOpacity style={styles.backBtn} onPress={() => setScreen('home')}><ChevronLeft size={26} color={THEME.textMain} /></TouchableOpacity>
       <Text style={styles.navTitle}>{title}</Text>
-      <View style={{ width: 40 }} />
+      <div style={{ width: 40 }} />
     </View>
   );
 
@@ -185,7 +194,6 @@ export default function App() {
     <View style={styles.livePage}>
       <StatusBar hidden />
       <View style={styles.liveTop}>
-        {/* LIVE RECORDING INDICATOR */}
         <View style={styles.recordingIndicator}>
           <Circle size={10} color={THEME.danger} fill={THEME.danger} />
           <Text style={styles.recText}>REC {formatTime(recordingSeconds)}</Text>
@@ -203,7 +211,6 @@ export default function App() {
                <View style={[styles.avatarBox, i === 0 && cloningEnabled && { backgroundColor: 'rgba(16, 185, 129, 0.2)' }]}>
                 {i === 0 && cloningEnabled ? <Mic size={24} color={THEME.success} /> : <Text style={styles.avatarLetter}>{p.userId?.charAt(0) || 'U'}</Text>}
               </View>
-              {/* Show mute icon if current user is muted */}
               {i === 0 && isMuted && <MicOff size={16} color={THEME.danger} />}
             </View>
            
@@ -212,7 +219,6 @@ export default function App() {
               <Text style={styles.tileLang}>{p.speak} ➜ {p.hear}</Text>
             </View>
 
-            {/* LIVE TRANSCRIPTION BOX */}
             <View style={styles.transcriptContainer}>
               <Text style={styles.transcriptText} numberOfLines={2}>
                 {liveTranscript[i] || "Waiting for audio..."}
@@ -225,7 +231,6 @@ export default function App() {
       </ScrollView>
 
       <View style={styles.bottomControls}>
-        {/* MUTE TOGGLE */}
         <TouchableOpacity 
           style={[styles.roundControl, isMuted && { backgroundColor: 'rgba(244, 63, 94, 0.2)', borderColor: THEME.danger }]} 
           onPress={() => setIsMuted(!isMuted)}
@@ -233,12 +238,10 @@ export default function App() {
           {isMuted ? <MicOff size={24} color={THEME.danger} /> : <Mic size={24} color={THEME.textMain} />}
         </TouchableOpacity>
 
-        {/* END CALL */}
         <TouchableOpacity onPress={() => setScreen('home')} style={[styles.roundControl, styles.endCall]}>
           <PhoneCall size={26} color="#fff" style={{ transform: [{ rotate: '135deg' }] }} />
         </TouchableOpacity>
 
-        {/* SPEAKER TOGGLE */}
         <TouchableOpacity 
           style={[styles.roundControl, !isSpeaker && { opacity: 0.5 }]} 
           onPress={() => setIsSpeaker(!isSpeaker)}
@@ -252,6 +255,48 @@ export default function App() {
   return (
     <View style={{ flex: 1, backgroundColor: THEME.background }}>
       <StatusBar barStyle="light-content" />
+
+      {/* --- INCOMING CALL POPUP --- */}
+      {incomingCall && (
+        <View style={styles.incomingPopupOverlay}>
+          <LinearGradient colors={[THEME.surface, '#1E293B']} style={styles.incomingCard}>
+            <View style={styles.popupHeader}>
+              <View style={styles.pulseContainer}>
+                <View style={styles.avatarLarge}>
+                  <User size={32} color={THEME.primary} />
+                </View>
+              </View>
+              <Text style={styles.incomingLabel}>INCOMING BRIDGE CALL</Text>
+              <Text style={styles.callerName}>{incomingCall.callerName}</Text>
+              <Text style={styles.callerId}>ID: {incomingCall.callerId}</Text>
+            </View>
+
+            <View style={styles.popupActions}>
+              <TouchableOpacity 
+                style={[styles.actionCircle, { backgroundColor: THEME.danger }]} 
+                onPress={() => setIncomingCall(null)}
+              >
+                <MicOff size={24} color="#fff" />
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={[styles.actionCircle, { backgroundColor: THEME.success }]} 
+                onPress={() => {
+                  setActiveConfig([
+                    { userId: user?.userId, speak: speakLang, hear: hearLang },
+                    { userId: incomingCall.callerId, speak: hearLang, hear: speakLang }
+                  ]);
+                  setScreen('active');
+                  setIncomingCall(null);
+                }}
+              >
+                <PhoneCall size={24} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          </LinearGradient>
+        </View>
+      )}
+
       {screen === 'home' && <HomeScreen user={user} device={device} setScreen={setScreen} />}
 
       {screen.includes('setup') && (
@@ -301,27 +346,21 @@ export default function App() {
                 <Text style={[styles.labelDark, { marginTop: 25 }]}>I WANT TO HEAR</Text>
                 <View style={styles.langRow}>{LANGUAGES.map(l => <TouchableOpacity key={'h' + l.code} onPress={() => setHearLang(l.code)} style={[styles.langSelect, hearLang === l.code && styles.langSelectActive]}><Text style={styles.flag}>{l.flag}</Text><Text style={[styles.langName, hearLang === l.code && styles.langNameActive]}>{l.label}</Text></TouchableOpacity>)}</View>
 
-              <TouchableOpacity 
+                <TouchableOpacity 
                   style={styles.launchBtn} 
                   onPress={() => {
                     let config = [];
-                    
-                    // 1. Aapka apna card (Hamesha pehla card)
                     config.push({ userId: user.userId || 'You', speak: speakLang, hear: hearLang });
 
                     if (screen === 'as-setup') {
-                     
                       config.push({ userId: 'user', speak: hearLang, hear: speakLang });
                     } 
                     else if (screen === 'dc-setup') {
-                      
                       const targetId = participantIds.trim() || 'Remote User';
                       config.push({ userId: targetId, speak: hearLang, hear: speakLang });
                     } 
                     else if (screen === 'mt-setup') {
-                    
                       const ids = participantIds.split(',').map(id => id.trim()).filter(id => id !== '');
-                      
                       for (let i = 1; i < participants; i++) {
                         config.push({ 
                           userId: ids[i-1] || `User ${i + 1}`, 
@@ -330,7 +369,6 @@ export default function App() {
                         });
                       }
                     }
-
                     setActiveConfig(config);
                     setScreen('active');
                   }}
@@ -349,11 +387,11 @@ export default function App() {
           <View style={styles.centerBox}><Bluetooth size={60} color={THEME.primary} /><Text style={styles.centerTitle}>Scanning...</Text><TouchableOpacity style={styles.scanOption} onPress={() => { setDevice('Galaxy Buds' as any); setScreen('home'); }}><Text style={styles.scanText}>Galaxy Buds Pro</Text><Check size={18} color={THEME.primary} /></TouchableOpacity></View>
         </SafeAreaView>
       )}
+
       {screen === 'history' && (
         <SafeAreaView style={styles.darkPage}>
           <Header title="Call Logs & History" />
           <ScrollView style={{ padding: 20 }}>
-            {/* Example History Card */}
             <View style={styles.historyItem}>
               <View style={styles.historyHeader}>
                 <View>
@@ -362,37 +400,29 @@ export default function App() {
                 </View>
                 <Activity size={20} color={THEME.primary} />
               </View>
-
-              {/* Transcript Preview Section */}
               <View style={styles.transcriptPreview}>
                 <Text style={styles.transcriptPreviewText} numberOfLines={2}>
                   "The speech-to-speech bridge is working perfectly. Testing Urdu to English cloning..."
                 </Text>
               </View>
-
-              {/* Action Buttons */}
               <View style={styles.historyActions}>
-                {/* Play Recording */}
                 <TouchableOpacity style={[styles.actionBtn, styles.playBtn]} onPress={() => showAlert('Audio Player', 'Playing the recorded conversation...')}>
                   <Play size={16} color={THEME.primary} />
                   <Text style={styles.actionBtnText}>Play Audio</Text>
                 </TouchableOpacity>
-
-                {/* Save to PDF */}
                 <TouchableOpacity style={[styles.actionBtn, styles.pdfBtn]} onPress={() => showAlert('Export PDF', 'Transcript has been saved to your documents as PDF.')}>
                   <FileText size={16} color={THEME.secondary} />
                   <Text style={styles.actionBtnText}>Save PDF</Text>
                 </TouchableOpacity>
               </View>
             </View>
-
-            {/* Placeholder for empty state if needed */}
             <Text style={{ color: THEME.textMuted, textAlign: 'center', marginTop: 20, fontSize: 12 }}>
               Only recent 50 calls are stored locally.
             </Text>
           </ScrollView>
         </SafeAreaView>
       )}
+
       {screen === 'settings' && <SafeAreaView style={styles.darkPage}><Header title="Profile" /><View style={{ padding: 20 }}><View style={styles.profileBox}><View style={styles.profileAvatar}><Text style={styles.profileLetter}>{user?.name?.charAt(0) ?? '?'}</Text></View><View><Text style={styles.profileName}>{user?.name}</Text><Text style={styles.profileId}>ID: {user?.userId}</Text></View></View><TouchableOpacity style={styles.logoutBtn} onPress={() => { logout(); setScreen('auth'); }}><LogOut size={18} color={THEME.danger} /><Text style={styles.logoutText}>Sign Out</Text></TouchableOpacity></View></SafeAreaView>}
     </View>
   );
@@ -509,5 +539,16 @@ const styles = StyleSheet.create({
   actionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10, borderRadius: 12, borderWidth: 1 },
   playBtn: { backgroundColor: 'rgba(6, 182, 212, 0.1)', borderColor: THEME.primary },
   pdfBtn: { backgroundColor: 'rgba(99, 102, 241, 0.1)', borderColor: THEME.secondary },
-  actionBtnText: { color: THEME.textMain, fontSize: 12, fontWeight: '700' }
+  actionBtnText: { color: THEME.textMain, fontSize: 12, fontWeight: '700' },
+  // --- INCOMING CALL STYLES ---
+  incomingPopupOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(15, 18, 25, 0.95)', justifyContent: 'center', alignItems: 'center', zIndex: 9999, padding: 30 },
+  incomingCard: { width: '100%', borderRadius: 40, padding: 30, alignItems: 'center', borderWidth: 1, borderColor: THEME.border, elevation: 20 },
+  popupHeader: { alignItems: 'center', marginBottom: 40 },
+  incomingLabel: { color: THEME.primary, fontSize: 12, fontWeight: '900', letterSpacing: 2, marginBottom: 10 },
+  callerName: { color: THEME.textMain, fontSize: 28, fontWeight: '800' },
+  callerId: { color: THEME.textMuted, fontSize: 14, marginTop: 4 },
+  avatarLarge: { width: 80, height: 80, borderRadius: 40, backgroundColor: THEME.background, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: THEME.primary },
+  popupActions: { flexDirection: 'row', gap: 40 },
+  actionCircle: { width: 65, height: 65, borderRadius: 33, justifyContent: 'center', alignItems: 'center', elevation: 10 },
+  pulseContainer: { marginBottom: 20, padding: 10, borderRadius: 100, backgroundColor: 'rgba(6, 182, 212, 0.1)' }
 });
