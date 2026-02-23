@@ -26,6 +26,7 @@ import {
 } from './meetingManager.js';
 import { translateText } from '../services/translate.js';
 import { transcribeAudio } from '../services/stt.js';
+import { synthesizeSpeech } from '../services/tts.js';
 
 const LOCALE_MAP = { UR: 'ur-PK', EN: 'en-US', AR: 'ar-SA' };
 
@@ -174,8 +175,11 @@ export function initSocket(httpServer) {
       try {
         const translated = await translateText(text, fromLang, toLang);
         console.log(`[pipeline] translated: "${translated}" → emitting to ${other.userId}`);
+        const locale = LOCALE_MAP[toLang] ?? 'en-US';
+        const audioBase64 = await synthesizeSpeech(translated, locale);
         io.to(other.socketId).emit('translated-text', {
           text: translated,
+          audioBase64,
           fromUserId: socket.data.userId,
         });
       } catch (err) {
@@ -211,8 +215,11 @@ export function initSocket(httpServer) {
         // Translate and forward to peer
         const translated = await translateText(text, speakLang, toLang);
         console.log(`[pipeline] translated: "${translated}" → ${other.userId}`);
+        const locale = LOCALE_MAP[toLang] ?? 'en-US';
+        const ttsAudio = await synthesizeSpeech(translated, locale);
         io.to(other.socketId).emit('translated-text', {
           text: translated,
+          audioBase64: ttsAudio,
           fromUserId: socket.data.userId,
         });
       } catch (err) {
@@ -352,14 +359,19 @@ export function initSocket(httpServer) {
       const uniqueLangs = [...new Set(joined.map(p => p.hearLang))];
       try {
         const pairs = await Promise.all(
-          uniqueLangs.map(lang =>
-            translateText(text, fromLang, lang).then(t => [lang, t])
-          )
+          uniqueLangs.map(async lang => {
+            const translated = await translateText(text, fromLang, lang);
+            const locale = LOCALE_MAP[lang] ?? 'en-US';
+            const audioBase64 = await synthesizeSpeech(translated, locale);
+            return [lang, { text: translated, audioBase64 }];
+          })
         );
         const cache = new Map(pairs);
         joined.forEach(r => {
+          const entry = cache.get(r.hearLang);
           io.to(r.socketId).emit('meeting-translated', {
-            text: cache.get(r.hearLang),
+            text: entry.text,
+            audioBase64: entry.audioBase64,
             fromUserId: senderId,
             meetingId,
           });
@@ -392,14 +404,19 @@ export function initSocket(httpServer) {
         const joined = getJoinedParticipants(meetingId).filter(p => p.userId !== senderId);
         const uniqueLangs = [...new Set(joined.map(p => p.hearLang))];
         const pairs = await Promise.all(
-          uniqueLangs.map(lang =>
-            translateText(text, speakLang, lang).then(t => [lang, t])
-          )
+          uniqueLangs.map(async lang => {
+            const translated = await translateText(text, speakLang, lang);
+            const locale = LOCALE_MAP[lang] ?? 'en-US';
+            const ttsAudio = await synthesizeSpeech(translated, locale);
+            return [lang, { text: translated, audioBase64: ttsAudio }];
+          })
         );
         const cache = new Map(pairs);
         joined.forEach(r => {
+          const entry = cache.get(r.hearLang);
           io.to(r.socketId).emit('meeting-translated', {
-            text: cache.get(r.hearLang),
+            text: entry.text,
+            audioBase64: entry.audioBase64,
             fromUserId: senderId,
             meetingId,
           });

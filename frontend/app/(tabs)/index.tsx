@@ -15,7 +15,7 @@ import { useSocket } from '@/hooks/useSocket';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 import { useBluetooth } from '@/hooks/useBluetooth';
-import * as Speech from 'expo-speech';
+import { Audio } from 'expo-av';
 
 const { width } = Dimensions.get('window');
 
@@ -37,46 +37,41 @@ const LANGUAGES = [
   { code: 'AR', label: 'Arabic', flag: '🇸🇦' }
 ];
 
-const DUMMY_TRANSCRIPTS = [
-  "Hello, I am joining the bridge.",
-  "Translation is processing in real-time.",
-  "Assalam-o-Alaikum, kaise hain aap?",
-  "The voice cloning quality is impressive.",
-  "System is now connected to the meeting table."
-];
-
 const LOCALE_MAP: Record<string, string> = {
   UR: 'ur-PK',
   EN: 'en-US',
   AR: 'ar-SA',
 };
 
-// Platform-aware TTS: Web Speech API on browser, expo-speech on native
-function speakText(text: string, locale: string) {
-  console.log('[TTS] speakText called:', text, locale);
+// Play base64 MP3 audio from Google Cloud TTS
+// Web: native HTMLAudioElement; Native: expo-av Sound
+async function playAudio(audioBase64: string) {
+  if (!audioBase64) return;
+  console.log('[TTS] playAudio called, bytes:', audioBase64.length);
+
   if (Platform.OS === 'web') {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
-
-    const doSpeak = () => {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = locale;
-      utterance.onerror = (e) => console.error('[TTS] error:', e.error);
-      utterance.onstart = () => console.log('[TTS] started speaking');
-      window.speechSynthesis.speak(utterance);
-    };
-
-    // Chrome loads voices asynchronously — speak() is silently ignored if called before voices load
-    if (window.speechSynthesis.getVoices().length > 0) {
-      doSpeak();
-    } else {
-      window.speechSynthesis.onvoiceschanged = () => {
-        window.speechSynthesis.onvoiceschanged = null;
-        doSpeak();
-      };
+    if (typeof window === 'undefined') return;
+    try {
+      const audio = new window.Audio('data:audio/mp3;base64,' + audioBase64);
+      await audio.play();
+    } catch (e: any) {
+      console.error('[TTS] web audio play error:', e);
     }
   } else {
-    try { Speech.speak(text, { language: locale }); } catch {}
+    try {
+      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: 'data:audio/mp3;base64,' + audioBase64 },
+        { shouldPlay: true }
+      );
+      sound.setOnPlaybackStatusUpdate((status: any) => {
+        if (status.isLoaded && status.didJustFinish) {
+          sound.unloadAsync();
+        }
+      });
+    } catch (e) {
+      console.error('[TTS] native audio play error:', e);
+    }
   }
 }
 
@@ -383,7 +378,25 @@ export default function App() {
     socket.on('call-error', onCallError);
     socket.on('discoverable-users', onDiscoverableUsers);
 
+    // When the socket reconnects the backend has already deleted the room
+    // (via the disconnect handler). The reconnecting client never receives
+    // peer-disconnected, so without this it would keep sending stale audio
+    // chunks and see endless "room not found" errors.
+    const onReconnect = () => {
+      if (roomIdRef.current) {
+        setRoomId(null);
+        setMeetingId(null);
+        setIsMeetingMode(false);
+        setCallState('idle');
+        setScreen('home');
+        setActiveConfig(null);
+        showAlert('Call Ended', 'Connection was lost.');
+      }
+    };
+    socket.on('connect', onReconnect);
+
     return () => {
+      socket.off('connect', onReconnect);
       socket.off('meeting-created', onMeetingCreated);
       socket.off('incoming-meeting-invite', onIncomingMeetingInvite);
       socket.off('meeting-joined-ack', onMeetingJoinedAck);
@@ -417,10 +430,10 @@ export default function App() {
   useEffect(() => {
     if (!socket) return;
 
-    const onTranslatedText = ({ text }: { text: string }) => {
-      console.log('[pipeline] translated-text received:', text, 'isSpeaker:', isSpeakerRef.current, 'hearLang:', hearLangRef.current);
-      if (isSpeakerRef.current) {
-        speakText(text, LOCALE_MAP[hearLangRef.current] ?? 'en-US');
+    const onTranslatedText = ({ text, audioBase64 }: { text: string; audioBase64?: string }) => {
+      console.log('[pipeline] translated-text received:', text, 'isSpeaker:', isSpeakerRef.current);
+      if (isSpeakerRef.current && audioBase64) {
+        playAudio(audioBase64);
       }
       setLiveTranscript(prev => ({ ...prev, 1: text }));
     };
@@ -434,13 +447,13 @@ export default function App() {
     socket.on('speech-transcript', onSpeechTranscript);
 
     // ── Meeting translated text ────────────────────────────────────────────────
-    const onMeetingTranslated = ({ text, fromUserId }: { text: string; fromUserId: string; meetingId: string }) => {
+    const onMeetingTranslated = ({ text, audioBase64, fromUserId }: { text: string; audioBase64?: string; fromUserId: string; meetingId: string }) => {
       const cfg = activeConfigRef.current;
       if (!cfg) return;
       const idx = cfg.findIndex((p: any) => p.userId === fromUserId);
       if (idx === -1) return;
-      if (isSpeakerRef.current) {
-        speakText(text, LOCALE_MAP[hearLangRef.current] ?? 'en-US');
+      if (isSpeakerRef.current && audioBase64) {
+        playAudio(audioBase64);
       }
       setLiveTranscript(prev => ({ ...prev, [idx]: text }));
     };
@@ -551,20 +564,6 @@ export default function App() {
           {cloningEnabled && <Text style={styles.cloningStatusLabel}>AI CLONE ACTIVE</Text>}
         </View>
       </View>
-
-      {/* Test button — sends a fixed phrase to verify translation+TTS without mic */}
-      <TouchableOpacity
-        onPress={() => {
-          if (roomId) {
-            const testText = speakLang === 'UR' ? 'السلام علیکم' : speakLang === 'AR' ? 'مرحبا' : 'Hello, this is a test message';
-            socket?.emit('speech-text', { roomId, text: testText });
-            setLiveTranscript(prev => ({ ...prev, 0: `🔵 ${testText}` }));
-          }
-        }}
-        style={{ alignSelf: 'center', backgroundColor: THEME.secondary, paddingHorizontal: 18, paddingVertical: 8, borderRadius: 20, marginBottom: 8 }}
-      >
-        <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>Send Test Phrase</Text>
-      </TouchableOpacity>
 
       <ScrollView contentContainerStyle={styles.participantsGrid}>
         {activeConfig?.map((p: any, i: number) => (

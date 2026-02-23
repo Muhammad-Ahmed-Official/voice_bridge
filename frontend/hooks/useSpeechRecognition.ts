@@ -1,6 +1,19 @@
 import { useRef, useCallback } from 'react';
 import { Platform } from 'react-native';
-import Voice from '@react-native-voice/voice';
+
+// Lazy-load so the file can be imported on platforms where the native module
+// isn't available (e.g. standard Expo Go). Requires a custom dev client for
+// full native speech recognition support.
+let _Voice: any = null;
+function getVoice(): any | null {
+  if (_Voice) return _Voice;
+  try {
+    _Voice = require('@react-native-voice/voice').default;
+  } catch {
+    console.warn('[STT] @react-native-voice/voice not available — requires custom dev client');
+  }
+  return _Voice;
+}
 
 export function useSpeechRecognition() {
   const recognitionRef = useRef<any>(null);
@@ -87,6 +100,8 @@ export function useSpeechRecognition() {
         }
       } else {
         // Native: @react-native-voice/voice
+        const Voice = getVoice();
+        if (!Voice) return;
         Voice.onSpeechResults = (e: any) => {
           const text = e.value?.[0];
           if (text) onResult(text);
@@ -103,7 +118,7 @@ export function useSpeechRecognition() {
       recognitionRef.current = null; // null first so onend doesn't restart
       if (rec) try { rec.stop(); } catch {}
     } else {
-      Voice.stop().catch(() => {});
+      getVoice()?.stop().catch(() => {});
     }
   }, []);
 
