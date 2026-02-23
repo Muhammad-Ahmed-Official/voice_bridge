@@ -1,4 +1,4 @@
-import { axiosInstance } from './axios';
+import { axiosInstance } from './axios.js';
 
 export type AuthUser = { userId: string; name: string };
 
