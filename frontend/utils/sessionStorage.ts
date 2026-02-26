@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import type { AuthUser } from '@/api/auth';
 
 const AUTH_USER_KEY = 'voice_bridge_user';
 
@@ -12,14 +13,18 @@ function getSessionStorage(): Storage | null {
   return null;
 }
 
-export function getSessionUser(): { userId: string; name: string } | null {
+export function getSessionUser(): AuthUser | null {
   try {
     const storage = getSessionStorage();
     const raw = storage ? storage.getItem(AUTH_USER_KEY) : memoryStore;
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.userId === 'string' && typeof parsed.name === 'string') {
-      return { userId: parsed.userId, name: parsed.name };
+      return { 
+        _id: parsed._id || '', 
+        userId: parsed.userId, 
+        name: parsed.name 
+      };
     }
     return null;
   } catch {
@@ -27,7 +32,7 @@ export function getSessionUser(): { userId: string; name: string } | null {
   }
 }
 
-export function setSessionUser(user: { userId: string; name: string }): void {
+export function setSessionUser(user: AuthUser): void {
   const raw = JSON.stringify(user);
   const storage = getSessionStorage();
   if (storage) {

@@ -15,6 +15,31 @@ function getVoice(): any | null {
   return _Voice;
 }
 
+// Languages supported by Chrome Web Speech API
+// Urdu (ur-PK) is NOT supported by Web Speech API - must use Google Cloud STT
+const WEB_SPEECH_SUPPORTED_LOCALES = [
+  'en-US', 'en-GB', 'en-AU', 'en-IN',
+  'ar-SA', 'ar-EG', 'ar-AE',
+  'es-ES', 'es-MX',
+  'fr-FR',
+  'de-DE',
+  'hi-IN',
+  'zh-CN', 'zh-TW',
+  'ja-JP',
+  'ko-KR',
+];
+
+export function isWebSpeechSupported(locale: string): boolean {
+  // Mobile pe Web Speech API available nahi hai
+  // Expo Go mein @react-native-voice/voice bhi kaam nahi karta
+  // So mobile pe hamesha false return karo - audio recorder use hoga
+  if (Platform.OS !== 'web') return false;
+  
+  return WEB_SPEECH_SUPPORTED_LOCALES.some(l => 
+    locale.toLowerCase().startsWith(l.toLowerCase().split('-')[0])
+  );
+}
+
 export function useSpeechRecognition() {
   const recognitionRef = useRef<any>(null);
 
@@ -24,15 +49,24 @@ export function useSpeechRecognition() {
       onResult: (text: string) => void,
       onPermissionDenied?: () => void,
       onInterim?: (text: string) => void,
-    ) => {
+      onUnsupportedLanguage?: () => void,
+    ): boolean => {
       if (Platform.OS === 'web') {
+        // Check if this language is supported by Web Speech API
+        if (!isWebSpeechSupported(locale)) {
+          console.log(`[STT] ${locale} not supported by Web Speech API, use audio recorder instead`);
+          onUnsupportedLanguage?.();
+          return false;
+        }
+
         const SpeechRecognitionCtor =
           (window as any).SpeechRecognition ??
           (window as any).webkitSpeechRecognition;
 
         if (!SpeechRecognitionCtor) {
           console.warn('[STT] SpeechRecognition not supported. Use Chrome or Edge.');
-          return;
+          onUnsupportedLanguage?.();
+          return false;
         }
 
         // Stop any existing instance before creating a new one
@@ -45,9 +79,9 @@ export function useSpeechRecognition() {
         const recognition = new SpeechRecognitionCtor();
         recognition.lang = locale;
         recognition.continuous = true;
-        recognition.interimResults = true; // show partial results so user knows mic is working
+        recognition.interimResults = true;
 
-        recognition.onstart = () => console.log('[STT] listening started, locale:', locale);
+        recognition.onstart = () => console.log('[STT] Web Speech API listening started, locale:', locale);
 
         recognition.onresult = (event: any) => {
           let interim = '';
@@ -57,12 +91,10 @@ export function useSpeechRecognition() {
             if (event.results[i].isFinal) final += t;
             else interim += t;
           }
-          // Show interim text in UI immediately so user knows mic is working
           if (interim) {
             console.log('[STT] interim:', interim);
             onInterim?.(interim);
           }
-          // Send final text to backend for translation
           if (final) {
             console.log('[STT] final:', final);
             onResult(final);
@@ -74,14 +106,16 @@ export function useSpeechRecognition() {
             recognitionRef.current = null;
             onPermissionDenied?.();
           } else if (event.error === 'aborted' || event.error === 'no-speech') {
-            // 'aborted' = we deliberately stopped it; 'no-speech' = silence — both are normal
+            // normal cases
+          } else if (event.error === 'language-not-supported') {
+            console.warn('[STT] Language not supported by browser:', locale);
+            recognitionRef.current = null;
+            onUnsupportedLanguage?.();
           } else {
             console.error('[STT] error:', event.error);
           }
         };
 
-        // Chrome stops after silence — restart only if still active
-        // Use a small delay to avoid InvalidStateError when Chrome hasn't fully closed yet
         recognition.onend = () => {
           if (recognitionRef.current === recognition) {
             setTimeout(() => {
@@ -95,18 +129,23 @@ export function useSpeechRecognition() {
         };
 
         recognitionRef.current = recognition;
-        try { recognition.start(); } catch (e) {
+        try { 
+          recognition.start(); 
+          return true;
+        } catch (e) {
           console.error('[STT] start failed:', e);
+          return false;
         }
       } else {
         // Native: @react-native-voice/voice
         const Voice = getVoice();
-        if (!Voice) return;
+        if (!Voice) return false;
         Voice.onSpeechResults = (e: any) => {
           const text = e.value?.[0];
           if (text) onResult(text);
         };
         Voice.start(locale).catch(() => {});
+        return true;
       }
     },
     []

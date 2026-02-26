@@ -43,7 +43,7 @@ export const signIn = async (req, res) => {
             return res.status(401).json({ status: false, message: "Incorrect password" });
         }
 
-        const userResponse = { userId: user.userId, name: user.userId };
+        const userResponse = { _id: user._id, userId: user.userId, name: user.userId };
         return res.status(200).json({ status: true, message: "Login successful", user: userResponse });
 
     } catch (error) {

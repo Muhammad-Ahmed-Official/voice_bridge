@@ -1,8 +1,7 @@
 import express from "express";
 import cors from "cors";
-// import cookieParser from "cookie-parser";
 import authRouter from "./routes/auth.routes.js";
-
+import historyRouter from "./routes/history.routes.js";
 const app = express();
 
 // Middleware Configurations – allow frontend (Expo web) origins
@@ -10,6 +9,7 @@ const allowedOrigins = [
   "http://localhost:19006",
   "http://127.0.0.1:8081",
   "http://127.0.0.1:19006",
+  "exp://192.168.0.105:8081",
   ...(process.env.ALLOWED_ORIGIN ? [process.env.ALLOWED_ORIGIN.replace(/^"|"$/g, "")] : []),
 ];
 app.use(cors({
@@ -27,5 +27,6 @@ app.use(express.json());
 
 // Routes
 app.use("/api/v1/auth", authRouter);
+app.use("/api/v1/history", historyRouter);
 
 export { app };
