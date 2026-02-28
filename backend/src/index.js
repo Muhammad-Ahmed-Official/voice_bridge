@@ -1,7 +1,7 @@
 import { createServer } from 'http';
 import { connectDB } from "./db/index.js";
 import dotenv from "dotenv";
-import { app } from './app.js';
+import app from './app.js';
 import { initSocket } from './socket/index.js';
 
 // Load environment variables

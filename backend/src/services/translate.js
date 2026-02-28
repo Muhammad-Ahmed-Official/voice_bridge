@@ -6,11 +6,20 @@ let translateClient = null;
 
 function getTranslateClient() {
   if (!translateClient) {
-    const credentials = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-    
-    if (credentials) {
+    const credentialsJson = process.env.GOOGLE_CREDENTIALS_JSON;
+    if (credentialsJson) {
+      try {
+        const credentials = JSON.parse(credentialsJson);
+        translateClient = new v2.Translate({ credentials });
+        console.log('[Translate] Initialized with service account credentials (env JSON)');
+      } catch (err) {
+        console.error('[Translate] Invalid GOOGLE_CREDENTIALS_JSON: parse failed');
+        throw new Error('GOOGLE_CREDENTIALS_JSON is set but contains invalid JSON');
+      }
+    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      const keyFilename = process.env.GOOGLE_APPLICATION_CREDENTIALS;
       translateClient = new v2.Translate({
-        keyFilename: credentials
+        keyFilename
       });
       console.log('[Translate] Initialized with service account credentials');
     } else if (process.env.GOOGLE_API_KEY) {
@@ -19,7 +28,7 @@ function getTranslateClient() {
       });
       console.log('[Translate] Initialized with API key');
     } else {
-      throw new Error('No Google Cloud credentials configured. Set GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_API_KEY');
+      throw new Error('No Google Cloud credentials configured. Set GOOGLE_CREDENTIALS_JSON, GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_API_KEY');
     }
   }
   return translateClient;
