@@ -8,12 +8,14 @@ import { LinearGradient } from 'expo-linear-gradient';
 import {
   Globe, User, Key, ChevronLeft, Settings, FileText,
   Headphones, PhoneCall, Users, Check, Zap, Activity, MicOff,
-  Volume2, Play, LogOut, Wifi, Mic, Cpu, VolumeX, Circle
+  Volume2, Play, LogOut, Bluetooth, BluetoothSearching, Mic, Cpu, VolumeX, Circle
 } from 'lucide-react-native';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSocket } from '@/hooks/useSocket';
 import { useSpeechRecognition, isWebSpeechSupported } from '@/hooks/useSpeechRecognition';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
+import { useBluetooth } from '@/hooks/useBluetooth';
+import { useBluetoothClassic } from '@/hooks/useBluetoothClassic';
 import { Audio } from 'expo-av';
 import { historyApi } from '@/api/history';
 import { useRouter } from 'expo-router';
@@ -149,7 +151,7 @@ const HomeScreen = ({ user, setScreen, router }: any) => (
     <SafeAreaView>
       <View style={styles.headerRow}>
         <View><Text style={styles.headerLabel}>AUTHENTICATED AS</Text><Text style={styles.headerName}>{user?.name}</Text><Text style={styles.headerId}>ID: {user?.userId}</Text></View>
-        <TouchableOpacity onPress={() => setScreen('bt')} style={styles.btButton}><Wifi size={26} color={THEME.primary} /></TouchableOpacity>
+        <TouchableOpacity onPress={() => setScreen('bt')} style={styles.btButton}><Bluetooth size={26} color={THEME.primary} /></TouchableOpacity>
       </View>
       <View style={styles.headerIcons}>
         <TouchableOpacity style={styles.headerIconBox} onPress={() => router.push('/history')}><FileText size={18} color={THEME.primary} /><Text style={styles.headerIconLabel}>History</Text></TouchableOpacity>
@@ -192,7 +194,20 @@ export default function App() {
   const { socket } = useSocket(user?.userId ?? null, user?._id ?? null);
   const { startListening, stopListening } = useSpeechRecognition();
   const { startRecording, stopRecording } = useAudioRecorder();
-  
+  const { devices: btDevices, isScanning: btScanning, scanError: btScanError, startScan: btStartScan, stopScan: btStopScan, isBleSupported } = useBluetooth();
+  const {
+    classicAvailable,
+    classicDevices,
+    bondedDevices,
+    isDiscovering: classicDiscovering,
+    classicError,
+    pairingAddress,
+    pairError,
+    startClassicDiscovery,
+    stopClassicDiscovery,
+    pairDevice,
+  } = useBluetoothClassic();
+
   // Track which STT mode is being used: 'browser' | 'audio-recorder' | null
   const [sttMode, setSttMode] = useState<'browser' | 'audio-recorder' | null>(null);
 
@@ -465,8 +480,10 @@ export default function App() {
     } else {
       socket.emit('stop-discoverable', { userId: user.userId });
       setDiscoverableUsers([]);
+      btStopScan();
+      stopClassicDiscovery();
     }
-  }, [screen, socket, user]);
+  }, [screen, socket, user, btStopScan, stopClassicDiscovery]);
 
   // ── translated-text — always reads latest isSpeaker/hearLang via refs ────
   useEffect(() => {
@@ -1003,48 +1020,169 @@ export default function App() {
 
       {screen === 'bt' && (
         <SafeAreaView style={styles.darkPage}>
-          <Header title="Nearby Users" />
+          <Header title="Bluetooth" />
 
-          {/* Icon */}
           <View style={btStyles.radarWrap}>
-            <Wifi size={36} color={THEME.primary} />
+            {btScanning || classicDiscovering ? (
+              <BluetoothSearching size={36} color={THEME.primary} />
+            ) : (
+              <Bluetooth size={36} color={THEME.primary} />
+            )}
           </View>
 
-          {discoverableUsers.length === 0 ? (
-            <Text style={btStyles.hint}>Looking for online Voice Bridge users...</Text>
-          ) : (
-            <ScrollView style={{ paddingHorizontal: 20 }}>
-              <Text style={btStyles.sectionLabel}>ONLINE VOICE BRIDGE USERS</Text>
-              {discoverableUsers.map((peer) => (
-                <TouchableOpacity
-                  key={peer.userId}
-                  style={btStyles.peerCard}
-                  onPress={() => {
-                    setCallState('calling');
-                    socket?.emit('call-user', {
-                      targetUserId: peer.userId,
-                      callerName: user?.userId,
-                      speakLang,
-                      hearLang,
-                    });
-                    setScreen('home');
-                  }}
-                >
-                  <View style={btStyles.peerAvatar}>
-                    <Text style={btStyles.peerLetter}>{peer.userId.charAt(0).toUpperCase()}</Text>
+          {(() => {
+            const hasBleDevices = btDevices.length > 0;
+            const hasClassicDevices = classicDevices.length > 0 || bondedDevices.length > 0;
+            const hasOnlineUsers = discoverableUsers.length > 0;
+            const hasAnyDevices = hasBleDevices || hasClassicDevices || hasOnlineUsers;
+
+            if (!hasAnyDevices) {
+              return (
+                <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 24 }}>
+                  <Text style={btStyles.hint}>No devices found. Turn on Bluetooth and tap below to scan.</Text>
+                  {btScanError && <Text style={btStyles.scanError}>{btScanError}</Text>}
+                  {classicError && <Text style={btStyles.scanError}>{classicError}</Text>}
+                  {pairError && <Text style={btStyles.scanError}>{pairError}</Text>}
+                  {isBleSupported && (
+                    <TouchableOpacity
+                      style={[btStyles.pairNowBtn, btScanning && btStyles.pairNowBtnDisabled]}
+                      onPress={btScanning ? undefined : btStartScan}
+                      disabled={btScanning}
+                    >
+                      {btScanning ? <ActivityIndicator size="small" color="#fff" /> : <Text style={btStyles.pairNowText}>Pair now</Text>}
+                    </TouchableOpacity>
+                  )}
+                  {Platform.OS === 'android' && classicAvailable && (
+                    <TouchableOpacity
+                      style={[btStyles.pairNowBtn, { marginTop: 12 }, classicDiscovering && btStyles.pairNowBtnDisabled]}
+                      onPress={classicDiscovering ? undefined : startClassicDiscovery}
+                      disabled={classicDiscovering}
+                    >
+                      {classicDiscovering ? <ActivityIndicator size="small" color="#fff" /> : <Text style={btStyles.pairNowText}>Find nearby phones</Text>}
+                    </TouchableOpacity>
+                  )}
+                  {!isBleSupported && !classicAvailable && (
+                    <Text style={btStyles.hint}>Use a development build (not Expo Go) to scan for devices.</Text>
+                  )}
+                </ScrollView>
+              );
+            }
+
+            return (
+              <ScrollView style={{ paddingHorizontal: 20, flex: 1 }} contentContainerStyle={{ paddingBottom: 24 }}>
+                {btScanError && <Text style={btStyles.scanError}>{btScanError}</Text>}
+                {classicError && <Text style={btStyles.scanError}>{classicError}</Text>}
+                {pairError && <Text style={btStyles.scanError}>{pairError}</Text>}
+
+                {hasBleDevices && (
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={btStyles.sectionLabel}>BLUETOOTH DEVICES</Text>
+                    {btDevices.map((device) => (
+                      <View key={device.id} style={btStyles.peerCard}>
+                        <View style={btStyles.peerAvatar}><Bluetooth size={20} color={THEME.primary} /></View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={btStyles.peerName}>{device.name || 'Unknown device'}</Text>
+                          <Text style={btStyles.peerId}>{device.id}</Text>
+                        </View>
+                      </View>
+                    ))}
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={btStyles.peerName}>{peer.name || peer.userId}</Text>
-                    <Text style={btStyles.peerId}>ID: {peer.userId}</Text>
+                )}
+
+                {Platform.OS === 'android' && (hasClassicDevices || classicAvailable) && (
+                  <View style={{ marginBottom: 16 }}>
+                    {!hasClassicDevices && classicAvailable && (
+                      <TouchableOpacity
+                        style={[btStyles.pairNowBtn, classicDiscovering && btStyles.pairNowBtnDisabled]}
+                        onPress={classicDiscovering ? undefined : startClassicDiscovery}
+                        disabled={classicDiscovering}
+                      >
+                        {classicDiscovering ? <ActivityIndicator size="small" color="#fff" /> : <Text style={btStyles.pairNowText}>Find nearby phones</Text>}
+                      </TouchableOpacity>
+                    )}
+                    {bondedDevices.length > 0 && (
+                      <>
+                        <Text style={btStyles.sectionLabel}>PAIRED</Text>
+                        {bondedDevices.map((device) => (
+                          <View key={device.address} style={btStyles.peerCard}>
+                            <View style={btStyles.peerAvatar}><Bluetooth size={20} color={THEME.primary} /></View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={btStyles.peerName}>{device.name || 'Unknown device'}</Text>
+                              <Text style={btStyles.peerId}>{device.address}</Text>
+                            </View>
+                            <View style={btStyles.pairedBadge}><Text style={btStyles.pairedBadgeText}>Paired</Text></View>
+                          </View>
+                        ))}
+                      </>
+                    )}
+                    {classicDevices.length > 0 && (
+                      <>
+                        <Text style={btStyles.sectionLabel}>DISCOVERED</Text>
+                        {classicDevices.map((device) => {
+                          const isPairing = pairingAddress === device.address;
+                          const isBonded = bondedDevices.some((b) => b.address === device.address);
+                          return (
+                            <View key={device.address} style={btStyles.peerCard}>
+                              <View style={btStyles.peerAvatar}><Bluetooth size={20} color={THEME.primary} /></View>
+                              <View style={{ flex: 1 }}>
+                                <Text style={btStyles.peerName}>{device.name || 'Unknown device'}</Text>
+                                <Text style={btStyles.peerId}>{device.address}</Text>
+                              </View>
+                              {isBonded ? (
+                                <View style={btStyles.pairedBadge}><Text style={btStyles.pairedBadgeText}>Paired</Text></View>
+                              ) : (
+                                <TouchableOpacity
+                                  style={[btStyles.connectBtn, isPairing && btStyles.pairNowBtnDisabled]}
+                                  onPress={isPairing ? undefined : () => pairDevice(device.address)}
+                                  disabled={isPairing}
+                                >
+                                  {isPairing ? <ActivityIndicator size="small" color="#fff" /> : <Text style={btStyles.connectText}>Pair</Text>}
+                                </TouchableOpacity>
+                              )}
+                            </View>
+                          );
+                        })}
+                      </>
+                    )}
                   </View>
-                  <View style={btStyles.connectBtn}>
-                    <Wifi size={14} color="#fff" />
-                    <Text style={btStyles.connectText}>Connect</Text>
+                )}
+
+                {!hasBleDevices && isBleSupported && (
+                  <TouchableOpacity
+                    style={[btStyles.pairNowBtn, btScanning && btStyles.pairNowBtnDisabled]}
+                    onPress={btScanning ? undefined : btStartScan}
+                    disabled={btScanning}
+                  >
+                    {btScanning ? <ActivityIndicator size="small" color="#fff" /> : <Text style={btStyles.pairNowText}>Pair now</Text>}
+                  </TouchableOpacity>
+                )}
+
+                {hasOnlineUsers && (
+                  <View style={{ marginTop: 8 }}>
+                    <Text style={btStyles.sectionLabel}>ONLINE USERS</Text>
+                    {discoverableUsers.map((peer) => (
+                      <TouchableOpacity
+                        key={peer.userId}
+                        style={btStyles.peerCard}
+                        onPress={() => {
+                          setCallState('calling');
+                          socket?.emit('call-user', { targetUserId: peer.userId, callerName: user?.userId, speakLang, hearLang });
+                          setScreen('home');
+                        }}
+                      >
+                        <View style={btStyles.peerAvatar}><Text style={btStyles.peerLetter}>{peer.userId.charAt(0).toUpperCase()}</Text></View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={btStyles.peerName}>{peer.name || peer.userId}</Text>
+                          <Text style={btStyles.peerId}>ID: {peer.userId}</Text>
+                        </View>
+                        <View style={btStyles.connectBtn}><Bluetooth size={14} color="#fff" /><Text style={btStyles.connectText}>Connect</Text></View>
+                      </TouchableOpacity>
+                    ))}
                   </View>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          )}
+                )}
+              </ScrollView>
+            );
+          })()}
         </SafeAreaView>
       )}
 
@@ -1176,7 +1314,12 @@ const btStyles = StyleSheet.create({
   statusText: { color: THEME.textMain, fontSize: 13, fontWeight: '600', flex: 1 },
   radarWrap: { alignItems: 'center', justifyContent: 'center', padding: 30 },
   hint: { color: THEME.textMuted, textAlign: 'center', marginTop: 10, fontSize: 14, paddingHorizontal: 40, lineHeight: 22 },
+  hintSmall: { color: THEME.textMuted, fontSize: 12, marginBottom: 12, lineHeight: 18 },
   sectionLabel: { color: THEME.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 12 },
+  pairNowBtn: { alignSelf: 'center', backgroundColor: THEME.primary, paddingHorizontal: 28, paddingVertical: 14, borderRadius: 16, minWidth: 140, alignItems: 'center' },
+  pairNowBtnDisabled: { opacity: 0.7 },
+  pairNowText: { color: '#fff', fontWeight: '800', fontSize: 15 },
+  scanError: { color: THEME.danger, textAlign: 'center', marginTop: 8, fontSize: 12, paddingHorizontal: 20 },
   peerCard: { flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: THEME.surface, padding: 16, borderRadius: 18, marginBottom: 12, borderWidth: 1, borderColor: THEME.border },
   peerAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(6, 182, 212, 0.15)', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: THEME.primary },
   peerLetter: { color: THEME.primary, fontSize: 18, fontWeight: '800' },
@@ -1184,6 +1327,8 @@ const btStyles = StyleSheet.create({
   peerId: { color: THEME.textMuted, fontSize: 11, marginTop: 2 },
   connectBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: THEME.primary, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12 },
   connectText: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  pairedBadge: { backgroundColor: THEME.success, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
+  pairedBadgeText: { color: '#fff', fontWeight: '700', fontSize: 11 },
 });
 
 

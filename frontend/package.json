@@ -5,8 +5,8 @@
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint"
   },
@@ -45,9 +45,12 @@
     "react-native-svg": "15.12.1",
     "react-native-web": "~0.21.0",
     "react-native-worklets": "0.5.1",
+    "react-native-ble-plx": "^3.1.2",
+    "react-native-bluetooth-classic": "1.73.0-rc.17",
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
+    "with-rn-bluetooth-classic": "^1.0.5",
     "@types/react": "~19.1.0",
     "eslint": "^9.25.0",
     "eslint-config-expo": "~10.0.0",
