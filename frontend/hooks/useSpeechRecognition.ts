@@ -1,20 +1,6 @@
 import { useRef, useCallback } from 'react';
 import { Platform } from 'react-native';
 
-// Lazy-load so the file can be imported on platforms where the native module
-// isn't available (e.g. standard Expo Go). Requires a custom dev client for
-// full native speech recognition support.
-let _Voice: any = null;
-function getVoice(): any | null {
-  if (_Voice) return _Voice;
-  try {
-    _Voice = require('@react-native-voice/voice').default;
-  } catch {
-    console.warn('[STT] @react-native-voice/voice not available — requires custom dev client');
-  }
-  return _Voice;
-}
-
 // Languages supported by Chrome Web Speech API
 // Urdu (ur-PK) is NOT supported by Web Speech API - must use Google Cloud STT
 const WEB_SPEECH_SUPPORTED_LOCALES = [
@@ -137,15 +123,10 @@ export function useSpeechRecognition() {
           return false;
         }
       } else {
-        // Native: @react-native-voice/voice
-        const Voice = getVoice();
-        if (!Voice) return false;
-        Voice.onSpeechResults = (e: any) => {
-          const text = e.value?.[0];
-          if (text) onResult(text);
-        };
-        Voice.start(locale).catch(() => {});
-        return true;
+        // Native / non-web:
+        // We don't use a native on-device STT engine anymore.
+        // Mobile STT is handled via the audio-recorder pipeline + backend STT.
+        return false;
       }
     },
     []
@@ -156,8 +137,6 @@ export function useSpeechRecognition() {
       const rec = recognitionRef.current;
       recognitionRef.current = null; // null first so onend doesn't restart
       if (rec) try { rec.stop(); } catch {}
-    } else {
-      getVoice()?.stop().catch(() => {});
     }
   }, []);
 
