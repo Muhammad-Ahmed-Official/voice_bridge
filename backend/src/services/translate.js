@@ -1,4 +1,6 @@
 import { v2 } from '@google-cloud/translate';
+import fs from 'fs';
+import path from 'path';
 
 const LANG_MAP = { UR: 'ur', EN: 'en', AR: 'ar' };
 
@@ -9,19 +11,30 @@ function getTranslateClient() {
     const credentialsJson = process.env.GOOGLE_CREDENTIALS_JSON;
     if (credentialsJson) {
       try {
-        const credentials = JSON.parse(credentialsJson);
+        let credentials;
+
+        // If env looks like a path (ends with .json), read file contents
+        if (credentialsJson.trim().endsWith('.json')) {
+          const resolvedPath = path.resolve(process.cwd(), credentialsJson.trim());
+          const raw = fs.readFileSync(resolvedPath, 'utf-8');
+          credentials = JSON.parse(raw);
+          console.log('[Translate] Initialized with service account credentials from file:', resolvedPath);
+        } else {
+          credentials = JSON.parse(credentialsJson);
+          console.log('[Translate] Initialized with service account credentials (env JSON)');
+        }
+
         translateClient = new v2.Translate({ credentials });
-        console.log('[Translate] Initialized with service account credentials (env JSON)');
       } catch (err) {
-        console.error('[Translate] Invalid GOOGLE_CREDENTIALS_JSON: parse failed');
-        throw new Error('GOOGLE_CREDENTIALS_JSON is set but contains invalid JSON');
+        console.error('[Translate] Invalid GOOGLE_CREDENTIALS_JSON:', err.message);
+        throw new Error('GOOGLE_CREDENTIALS_JSON is set but is neither valid JSON nor a readable .json file');
       }
     } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       const keyFilename = process.env.GOOGLE_APPLICATION_CREDENTIALS;
       translateClient = new v2.Translate({
         keyFilename
       });
-      console.log('[Translate] Initialized with service account credentials');
+      console.log('[Translate] Initialized with service account credentials (GOOGLE_APPLICATION_CREDENTIALS)');
     } else if (process.env.GOOGLE_API_KEY) {
       translateClient = new v2.Translate({
         key: process.env.GOOGLE_API_KEY

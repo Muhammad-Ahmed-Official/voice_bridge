@@ -10,6 +10,7 @@ const allowedOrigins = [
   "http://127.0.0.1:8081",
   "http://127.0.0.1:19006",
   "exp://192.168.0.105:8081",
+  "exp://qv0qavq-amahmed-8081.exp.direct",
   ...(process.env.ALLOWED_ORIGIN ? [process.env.ALLOWED_ORIGIN.replace(/^"|"$/g, "")] : []),
 ];
 app.use(cors({

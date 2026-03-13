@@ -3,9 +3,9 @@
 @preconcurrency import ExpoModulesCore
 
 private let fetchRequestQueue = DispatchQueue(label: "expo.modules.fetch.RequestQueue")
-@MainActor internal var urlSessionConfigurationProvider: NSURLSessionConfigurationProvider?
+nonisolated(unsafe) internal var urlSessionConfigurationProvider: NSURLSessionConfigurationProvider?
 
-@MainActor public final class ExpoFetchModule: @preconcurrency Module {
+public final class ExpoFetchModule: Module {
   private lazy var urlSession = createURLSession()
   private let urlSessionDelegate: URLSessionSessionDelegateProxy
 
@@ -58,7 +58,7 @@ private let fetchRequestQueue = DispatchQueue(label: "expo.modules.fetch.Request
       AsyncFunction("arrayBuffer") { (response: NativeResponse, promise: Promise) in
         response.waitFor(states: [.bodyCompleted]) { _ in
           let data = response.sink.finalize()
-          promise.resolve(data)
+          promise.resolve(ArrayBuffer.wrap(dataWithoutCopy: data))
         }
       }.runOnQueue(fetchRequestQueue)
 

@@ -16,7 +16,7 @@ import { useSpeechRecognition, isWebSpeechSupported } from '@/hooks/useSpeechRec
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 import { useBluetooth } from '@/hooks/useBluetooth';
 import { useBluetoothClassic } from '@/hooks/useBluetoothClassic';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-audio';
 import { historyApi } from '@/api/history';
 import { useRouter } from 'expo-router';
 
@@ -56,7 +56,7 @@ function speakText(text: string, locale: string) {
 }
 
 // Play base64 MP3 audio from Google Cloud TTS
-// Web: native HTMLAudioElement; Native: expo-av Sound
+// Web: native HTMLAudioElement; Native: expo-audio player
 async function playAudio(audioBase64: string) {
   if (!audioBase64) return;
   console.log('[TTS] playAudio called, bytes:', audioBase64.length);
@@ -71,16 +71,36 @@ async function playAudio(audioBase64: string) {
     }
   } else {
     try {
-      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: 'data:audio/mp3;base64,' + audioBase64 },
-        { shouldPlay: true }
-      );
-      sound.setOnPlaybackStatusUpdate((status: any) => {
-        if (status.isLoaded && status.didJustFinish) {
-          sound.unloadAsync();
-        }
+      // Guard: expo-audio is not available in Expo Go; avoid native crash
+      if (!Audio || typeof (Audio as any).setAudioModeAsync !== 'function' || typeof (Audio as any).createAudioPlayer !== 'function') {
+        console.warn('[TTS] expo-audio not available on this platform; skipping native playback');
+        return;
+      }
+
+      await (Audio as any).setAudioModeAsync({
+        playsInSilentModeIOS: true,
+        allowsRecordingIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: true,
       });
+
+      const player = (Audio as any).createAudioPlayer({
+        uri: 'data:audio/mp3;base64,' + audioBase64,
+      });
+
+      player.play();
+
+      // Best-effort cleanup: release player after a short delay
+      setTimeout(() => {
+        try {
+          player.remove();
+        } catch {
+          // ignore
+        }
+      }, 60000);
     } catch (e) {
       console.error('[TTS] native audio play error:', e);
     }
@@ -552,43 +572,10 @@ export default function App() {
     }
 
     const locale = LOCALE_MAP[speakLang];
-    const useWebSpeech = isWebSpeechSupported(locale);
-    
-    console.log(`[pipeline] STT starting for ${speakLang} (${locale}), useWebSpeech: ${useWebSpeech}`);
+    console.log(`[pipeline] STT starting for ${speakLang} (${locale}) using recorder-only pipeline`);
 
-    if (useWebSpeech) {
-      // Use Web Speech API for supported languages (English, Arabic)
-      setSttMode('browser');
-      const started = startListening(
-        locale,
-        (text: string) => {
-          if (isMeetingModeRef.current) {
-            socket?.emit('meeting-speech-text', { meetingId: meetingIdRef.current, text });
-          } else {
-            socket?.emit('speech-text', { roomId: roomIdRef.current, text });
-          }
-          setLiveTranscript(prev => ({ ...prev, 0: `🎤 ${text}` }));
-        },
-        () => showAlert(
-          'Microphone Blocked',
-          'Allow microphone access:\n1. Click the lock icon\n2. Set Microphone → Allow\n3. Refresh the page',
-        ),
-        (interim: string) => {
-          setLiveTranscript(prev => ({ ...prev, 0: `🎤 ${interim}...` }));
-        },
-        () => {
-          // Fallback to audio recorder if Web Speech fails
-          console.log('[pipeline] Web Speech failed, falling back to audio recorder');
-          startAudioRecorderMode();
-        }
-      );
-      if (!started) {
-        startAudioRecorderMode();
-      }
-    } else {
-      // Use Audio Recorder for unsupported languages (Urdu)
-      startAudioRecorderMode();
-    }
+    // ── All platforms: use recorder + backend STT ───────────────────────────
+    startAudioRecorderMode();
 
     function startAudioRecorderMode() {
       setSttMode('audio-recorder');

@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Phone, Users, Bluetooth, Trash2, Clock, Play, Square } from 'lucide-react-native';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-audio';
 import { useAuth } from '@/contexts/AuthContext';
 import { historyApi, HistoryItem } from '@/api/history';
 
@@ -81,39 +81,40 @@ export default function HistoryScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
-  const soundRef = useRef<Audio.Sound | null>(null);
+  const playerRef = useRef<ReturnType<typeof Audio.createAudioPlayer> | null>(null);
 
   const playRecording = useCallback(async (item: HistoryItem) => {
     if (!item.callRecordingUrl) return;
 
     try {
       if (playingId === item._id) {
-        await soundRef.current?.stopAsync();
-        await soundRef.current?.unloadAsync();
-        soundRef.current = null;
+        playerRef.current?.pause();
+        playerRef.current?.remove();
+        playerRef.current = null;
         setPlayingId(null);
         return;
       }
 
-      if (soundRef.current) {
-        await soundRef.current.stopAsync();
-        await soundRef.current.unloadAsync();
+      if (playerRef.current) {
+        playerRef.current.pause();
+        playerRef.current.remove();
       }
 
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: item.callRecordingUrl },
-        { shouldPlay: true }
-      );
-      soundRef.current = sound;
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+
+      const player = Audio.createAudioPlayer({ uri: item.callRecordingUrl });
+      playerRef.current = player;
       setPlayingId(item._id);
 
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          setPlayingId(null);
-          sound.unloadAsync();
-          soundRef.current = null;
-        }
-      });
+      player.play();
     } catch (error: any) {
       console.error('[History] Play error:', error.message);
       setPlayingId(null);
@@ -122,7 +123,15 @@ export default function HistoryScreen() {
 
   useEffect(() => {
     return () => {
-      soundRef.current?.unloadAsync();
+      if (playerRef.current) {
+        try {
+          playerRef.current.pause();
+          playerRef.current.remove();
+        } catch {
+          // ignore
+        }
+        playerRef.current = null;
+      }
     };
   }, []);
 

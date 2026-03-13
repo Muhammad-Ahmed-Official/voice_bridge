@@ -1,13 +1,20 @@
 import { useRef, useCallback } from 'react';
 import { Platform } from 'react-native';
-import { Audio } from 'expo-av';
+import {
+  Audio,
+  AudioModule,
+  InterruptionModeAndroid,
+  InterruptionModeIOS,
+  RecordingPresets,
+  useAudioRecorder as useExpoAudioRecorder,
+} from 'expo-audio';
 import * as FileSystemLegacy from 'expo-file-system/legacy';
 
 const CYCLE_MS = 4000; // record 4-second chunks, send each to Google STT
 
 export function useAudioRecorder() {
   const activeRef = useRef(false);
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recorder = useExpoAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const streamRef = useRef<MediaStream | null>(null);
 
   const startRecording = useCallback(
@@ -29,7 +36,14 @@ export function useAudioRecorder() {
     onDenied?: () => void,
   ) {
     try {
-      const permission = await Audio.requestPermissionsAsync();
+      // Guard: expo-audio is not available in Expo Go
+      if (!AudioModule || typeof AudioModule.requestRecordingPermissionsAsync !== 'function' || !Audio || typeof Audio.setAudioModeAsync !== 'function') {
+        console.warn('[AudioRecorder] expo-audio not available on this platform; skipping native recording');
+        onDenied?.();
+        return;
+      }
+
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
         console.warn('[AudioRecorder] Permission denied');
         onDenied?.();
@@ -39,6 +53,11 @@ export function useAudioRecorder() {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: true,
       });
 
       activeRef.current = true;
@@ -54,41 +73,16 @@ export function useAudioRecorder() {
     if (!activeRef.current) return;
 
     try {
-      const recording = new Audio.Recording();
-      // Android: Use AMR_WB which Google STT supports
-      // iOS: Use LINEAR PCM which Google STT supports
-      await recording.prepareToRecordAsync({
-        android: {
-          extension: '.amr',
-          outputFormat: Audio.AndroidOutputFormat.AMR_WB,
-          audioEncoder: Audio.AndroidAudioEncoder.AMR_WB,
-          sampleRate: 16000,
-          numberOfChannels: 1,
-          bitRate: 23850,
-        },
-        ios: {
-          extension: '.wav',
-          outputFormat: Audio.IOSOutputFormat.LINEARPCM,
-          audioQuality: Audio.IOSAudioQuality.HIGH,
-          sampleRate: 16000,
-          numberOfChannels: 1,
-          bitRate: 256000,
-          linearPCMBitDepth: 16,
-          linearPCMIsBigEndian: false,
-          linearPCMIsFloat: false,
-        },
-        web: {},
-      });
-
-      recordingRef.current = recording;
-      await recording.startAsync();
+      await recorder.prepareToRecordAsync();
+      await recorder.record();
 
       setTimeout(async () => {
         if (!activeRef.current) return;
 
         try {
-          await recording.stopAndUnloadAsync();
-          const uri = recording.getURI();
+          await recorder.stop();
+          const status = await recorder.getStatusAsync();
+          const uri = status?.uri;
           
           if (uri) {
             // Use legacy API for expo-file-system SDK 54+
@@ -97,8 +91,8 @@ export function useAudioRecorder() {
             });
             
             console.log('[AudioRecorder] Native chunk ready, size:', base64.length);
-            // Android uses AMR_WB, iOS uses LINEAR16
-            const mimeType = Platform.OS === 'android' ? 'audio/amr-wb' : 'audio/l16;rate=16000';
+            // RecordingPresets.HIGH_QUALITY defaults to AAC/linear formats; backend must accept these mime types
+            const mimeType = Platform.OS === 'android' ? 'audio/m4a' : 'audio/m4a';
             onChunk(base64, mimeType);
             
             await FileSystemLegacy.deleteAsync(uri, { idempotent: true });
@@ -191,12 +185,9 @@ export function useAudioRecorder() {
         streamRef.current = null;
       }
     } else {
-      if (recordingRef.current) {
-        try {
-          await recordingRef.current.stopAndUnloadAsync();
-        } catch {}
-        recordingRef.current = null;
-      }
+      try {
+        await recorder.stop();
+      } catch {}
     }
     
     console.log('[AudioRecorder] Stopped');
