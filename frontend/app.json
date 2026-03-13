@@ -49,16 +49,6 @@
           "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to Bluetooth devices"
         }
       ],
-      [
-        "with-rn-bluetooth-classic",
-        {
-          "peripheralUsageDescription": "Allow Voice Bridge to find nearby phones via Bluetooth.",
-          "alwaysUsageDescription": "Allow Voice Bridge to use Bluetooth to connect to nearby devices.",
-          "protocols": [
-            "com.axplicit.voicebridge"
-          ]
-        }
-      ],
       "expo-font",
       "expo-image",
       "expo-web-browser",
