@@ -1,4 +1,4 @@
-import { axiosInstance } from './axios.js';
+import { API_BASE_URL } from "./axios";
 
 export type AuthUser = {
   _id: string;
@@ -22,11 +22,11 @@ export type SignUpResponse = {
 };
 
 export async function signInApi(payload: SignInPayload): Promise<SignInResponse> {
-  const { data } = await axiosInstance.post<SignInResponse>('auth/signin', payload);
+  const { data } = await API_BASE_URL.post<SignInResponse>('auth/signin', payload);
   return data;
 }
 
 export async function signUpApi(payload: SignUpPayload): Promise<SignUpResponse> {
-  const { data } = await axiosInstance.post<SignUpResponse>('auth/signup', payload);
+  const { data } = await API_BASE_URL.post<SignUpResponse>('auth/signup', payload);
   return data;
 }
