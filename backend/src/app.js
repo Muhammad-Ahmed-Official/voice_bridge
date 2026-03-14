@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import { isDbConnected } from "./db/index.js";
 import authRouter from "./routes/auth.routes.js";
 import historyRouter from "./routes/history.routes.js";
 
@@ -10,6 +11,17 @@ app.use(express.json());
 
 app.get("/", (req, res) => {
   res.send("API Running 🚀");
+});
+
+// Avoid "buffering timed out" – only run API when MongoDB is connected
+app.use("/api/v1", (req, res, next) => {
+  if (!isDbConnected()) {
+    return res.status(503).json({
+      status: false,
+      message: "Database is not ready. Please try again in a moment.",
+    });
+  }
+  next();
 });
 
 app.use("/api/v1/auth", authRouter);
