@@ -12,11 +12,11 @@ const getApiUrl = () => {
     if (window.location.hostname === 'localhost') {
       return "http://localhost:3000";
     }
-    return "https://voice-bridge-pfzq4vdxj-muhammadahmedanis-projects.vercel.app/api/v1";
+    return "https://voice-bridge-gules.vercel.app/api/v1";
   }
 
   // Priority 3: Native (React Native — no window.location)
-  return "https://voice-bridge-pfzq4vdxj-muhammadahmedanis-projects.vercel.app/api/v1";
+  return "https://voice-bridge-gules.vercel.app/api/v1";
 };
 
 
