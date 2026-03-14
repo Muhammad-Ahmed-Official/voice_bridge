@@ -26,7 +26,7 @@ import {
 } from './meetingManager.js';
 import { translateText } from '../services/translate.js';
 import { transcribeAudio } from '../services/stt.js';
-import { synthesizeSpeech } from '../services/tts.js';
+import { getTtsForUser } from '../services/tts.js';
 
 const LOCALE_MAP = { UR: 'ur-PK', EN: 'en-US', AR: 'ar-SA' };
 
@@ -97,7 +97,11 @@ function bufferAndTranslate(io, socket, roomId, text, speakLang, toLang, other, 
       console.log(`[Receiver] ${other.userId}`);
       console.log(`==========================================\n`);
       
-      const ttsAudio = await synthesizeSpeech(result.text, ttsLocale);
+      const ttsAudio = await getTtsForUser({
+        text: result.text,
+        locale: ttsLocale,
+        speakerUserId: socket.data.userId,
+      });
       io.to(other.socketId).emit('translated-text', {
         text: result.text,
         audioBase64: ttsAudio,
@@ -284,7 +288,11 @@ export function initSocket(httpServer) {
         const locale = LOCALE_MAP[toLang] ?? 'en-US';
         let audioBase64 = null;
         try {
-          audioBase64 = await synthesizeSpeech(result.text, locale);
+          audioBase64 = await getTtsForUser({
+            text: result.text,
+            locale,
+            speakerUserId: socket.data.userId,
+          });
         } catch (ttsErr) {
           console.warn('[TTS] skipped (blocked/unavailable):', ttsErr.message);
         }
@@ -499,7 +507,11 @@ export function initSocket(httpServer) {
             const locale = LOCALE_MAP[lang] ?? 'en-US';
             let audioBase64 = null;
             try {
-              audioBase64 = await synthesizeSpeech(result.text, locale);
+              audioBase64 = await getTtsForUser({
+                text: result.text,
+                locale,
+                speakerUserId: senderId,
+              });
             } catch (ttsErr) {
               console.warn('[TTS] skipped (blocked/unavailable):', ttsErr.message);
             }
@@ -558,7 +570,11 @@ export function initSocket(httpServer) {
             const locale = LOCALE_MAP[lang] ?? 'en-US';
             let ttsAudio = null;
             try {
-              ttsAudio = await synthesizeSpeech(result.text, locale);
+              ttsAudio = await getTtsForUser({
+                text: result.text,
+                locale,
+                speakerUserId: senderId,
+              });
             } catch (ttsErr) {
               console.warn('[Meeting TTS] skipped:', ttsErr.message);
             }

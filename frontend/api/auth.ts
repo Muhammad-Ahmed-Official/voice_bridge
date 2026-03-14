@@ -1,6 +1,11 @@
 import { axiosInstance } from './axios.js';
 
-export type AuthUser = { _id: string; userId: string; name: string };
+export type AuthUser = {
+  _id: string;
+  userId: string;
+  name: string;
+  voiceCloningEnabled?: boolean;
+};
 
 export type SignInPayload = { userId: string; password: string };
 export type SignUpPayload = { userId: string; password: string };

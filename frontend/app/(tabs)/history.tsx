@@ -11,7 +11,8 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Phone, Users, Bluetooth, Trash2, Clock, Play, Square } from 'lucide-react-native';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-audio';
+// @ts-ignore - expo-audio types may not expose these members in this toolchain
+import { Audio } from 'expo-audio';
 import { useAuth } from '@/contexts/AuthContext';
 import { historyApi, HistoryItem } from '@/api/history';
 
@@ -100,17 +101,17 @@ export default function HistoryScreen() {
         playerRef.current.remove();
       }
 
-      await Audio.setAudioModeAsync({
+      await (Audio as any).setAudioModeAsync({
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
         staysActiveInBackground: false,
-        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+        interruptionModeIOS: (Audio as any)?.InterruptionModeIOS?.DoNotMix,
+        interruptionModeAndroid: (Audio as any)?.InterruptionModeAndroid?.DoNotMix,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
 
-      const player = Audio.createAudioPlayer({ uri: item.callRecordingUrl });
+      const player = (Audio as any).createAudioPlayer({ uri: item.callRecordingUrl });
       playerRef.current = player;
       setPlayingId(item._id);
 

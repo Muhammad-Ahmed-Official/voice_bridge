@@ -15,8 +15,10 @@ import { useSocket } from '@/hooks/useSocket';
 import { useSpeechRecognition, isWebSpeechSupported } from '@/hooks/useSpeechRecognition';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 import { useBluetooth } from '@/hooks/useBluetooth';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-audio';
+// @ts-ignore - expo-audio types may not expose these members in this toolchain
+import { Audio } from 'expo-audio';
 import { historyApi } from '@/api/history';
+import { updatePreferences } from '@/api/user';
 import { useRouter } from 'expo-router';
 
 const { width } = Dimensions.get('window');
@@ -80,8 +82,9 @@ async function playAudio(audioBase64: string) {
         playsInSilentModeIOS: true,
         allowsRecordingIOS: true,
         staysActiveInBackground: false,
-        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+        // Access interruption modes off Audio to avoid TS type issues
+        interruptionModeIOS: (Audio as any)?.InterruptionModeIOS?.DoNotMix,
+        interruptionModeAndroid: (Audio as any)?.InterruptionModeAndroid?.DoNotMix,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: true,
       });
@@ -202,7 +205,9 @@ export default function App() {
   const isSpeakerRef = React.useRef(true);
   const hearLangRef = React.useRef('EN');
   const [participants, setParticipants] = useState(3);
-  const [cloningEnabled, setCloningEnabled] = useState(false);
+  const [cloningEnabled, setCloningEnabled] = useState(
+    !!user?.voiceCloningEnabled,
+  );
   const [participantIds, setParticipantIds] = useState('');
   const [activeConfig, setActiveConfig] = useState<any>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -918,13 +923,43 @@ export default function App() {
                 )}
 
                 <View style={styles.cloningCard}>
-                  <View style={styles.cloningIconBox}><Cpu size={24} color={THEME.primary} /></View>
+                  <View style={styles.cloningIconBox}>
+                    <Cpu size={24} color={THEME.primary} />
+                  </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.cloningTitle}>Neural Voice Cloning</Text>
-                    <Text style={styles.cloningDesc}>Use your natural voice for translations.</Text>
+                    <Text style={styles.cloningDesc}>
+                      Use your natural voice for translations (ElevenLabs).
+                    </Text>
                   </View>
-                  <TouchableOpacity onPress={() => setCloningEnabled(!cloningEnabled)} style={[styles.toggleTrack, cloningEnabled && styles.toggleTrackActive]}>
-                    <View style={[styles.toggleThumb, cloningEnabled && styles.toggleThumbActive]} />
+                  <TouchableOpacity
+                    onPress={async () => {
+                      const next = !cloningEnabled;
+                      setCloningEnabled(next);
+                      if (!user?.userId) return;
+                      try {
+                        await updatePreferences({
+                          userId: user.userId,
+                          voiceCloningEnabled: next,
+                        });
+                      } catch (err: any) {
+                        console.error(
+                          '[Preferences] Failed to update voice cloning flag:',
+                          err.message || err,
+                        );
+                      }
+                    }}
+                    style={[
+                      styles.toggleTrack,
+                      cloningEnabled && styles.toggleTrackActive,
+                    ]}
+                  >
+                    <View
+                      style={[
+                        styles.toggleThumb,
+                        cloningEnabled && styles.toggleThumbActive,
+                      ]}
+                    />
                   </TouchableOpacity>
                 </View>
 
