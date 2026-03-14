@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { isDbConnected } from "./db/index.js";
+import { isDbConnected, ensureConnection } from "./db/index.js";
 import authRouter from "./routes/auth.routes.js";
 import historyRouter from "./routes/history.routes.js";
 
@@ -13,8 +13,18 @@ app.get("/", (req, res) => {
   res.send("API Running 🚀");
 });
 
-// Avoid "buffering timed out" – only run API when MongoDB is connected
-app.use("/api/v1", (req, res, next) => {
+// Ensure MongoDB is connected (lazy connect on first request – fixes Vercel serverless)
+app.use("/api/v1", async (req, res, next) => {
+  if (isDbConnected()) return next();
+  try {
+    await ensureConnection();
+  } catch (err) {
+    console.error("[DB] ensureConnection failed:", err.message);
+    return res.status(503).json({
+      status: false,
+      message: "Database is not ready. Please try again in a moment.",
+    });
+  }
   if (!isDbConnected()) {
     return res.status(503).json({
       status: false,

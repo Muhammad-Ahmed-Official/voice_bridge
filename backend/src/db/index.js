@@ -30,6 +30,22 @@ export const connectDB = async () => {
 
 export const isDbConnected = () => mongoose.connection.readyState === 1;
 
+/** Lazy connect: use on first request (e.g. Vercel serverless where startup connectDB may not run). Does not exit process. */
+let connectPromise = null;
+export const ensureConnection = async () => {
+  if (mongoose.connection.readyState === 1) return;
+  if (!MONGO_URI || !MONGO_URI.startsWith("mongodb")) {
+    throw new Error("MONGO_URI is missing or invalid");
+  }
+  if (!connectPromise) {
+    connectPromise = mongoose.connect(`${MONGO_URI}/${DB_NAME}`, {
+      serverSelectionTimeoutMS: 15000,
+      bufferCommands: false,
+    });
+  }
+  await connectPromise;
+};
+
 // Gracefully handle application termination
 process.on('SIGINT', async () => {
     console.log("Application is terminating...");
