@@ -732,6 +732,13 @@ export default function App() {
           {isSpeaker ? <Volume2 size={24} color={THEME.primary} /> : <VolumeX size={24} color={THEME.textMuted} />}
         </TouchableOpacity>
       </View>
+      {Platform.OS === 'web' && (
+        <View style={{ paddingHorizontal: 24, paddingBottom: 10 }}>
+          <Text style={{ color: THEME.textMuted, fontSize: 11, textAlign: 'center' }}>
+            On web, audio follows your system output (Bluetooth headset / speakers selected in OS).
+          </Text>
+        </View>
+      )}
     </View>
   );
 
@@ -1046,19 +1053,29 @@ export default function App() {
             if (!hasAnyDevices) {
               return (
                 <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 24 }}>
-                  <Text style={btStyles.hint}>No devices found. Turn on Bluetooth and tap below to scan.</Text>
+                  <Text style={btStyles.hint}>
+                    {Platform.OS === 'web'
+                      ? 'No Bluetooth scan results. On web, pair your headset or phone in Windows Bluetooth settings and select it as the audio output. Voice Bridge will automatically use the system output device.'
+                      : 'No devices found. Turn on Bluetooth and tap below to scan.'}
+                  </Text>
                   {btScanError && <Text style={btStyles.scanError}>{btScanError}</Text>}
-                  {isBleSupported && (
+                  {isBleSupported && Platform.OS !== 'web' && (
                     <TouchableOpacity
                       style={[btStyles.pairNowBtn, btScanning && btStyles.pairNowBtnDisabled]}
                       onPress={btScanning ? undefined : btStartScan}
                       disabled={btScanning}
                     >
-                      {btScanning ? <ActivityIndicator size="small" color="#fff" /> : <Text style={btStyles.pairNowText}>Pair now</Text>}
+                      {btScanning ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={btStyles.pairNowText}>Pair now</Text>
+                      )}
                     </TouchableOpacity>
                   )}
-                  {!isBleSupported && (
-                    <Text style={btStyles.hint}>Use a development build (not Expo Go) to scan for devices.</Text>
+                  {!isBleSupported && Platform.OS !== 'web' && (
+                    <Text style={btStyles.hint}>
+                      Use a development build (not Expo Go) to scan for devices.
+                    </Text>
                   )}
                 </ScrollView>
               );

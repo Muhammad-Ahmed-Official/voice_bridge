@@ -64,7 +64,13 @@ export function useBluetooth() {
   }, []);
 
   const startScan = useCallback(async () => {
-    if (!isNative || !bleAvailable) {
+    if (!isNative) {
+      setScanError(
+        'Bluetooth scanning is only available on the native app. On web, pair your device in system Bluetooth settings and audio will follow that output.',
+      );
+      return;
+    }
+    if (!bleAvailable) {
       setScanError('Bluetooth scanning is only available on iOS and Android (development build).');
       return;
     }
