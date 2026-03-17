@@ -15,8 +15,7 @@ import { useSocket } from '@/hooks/useSocket';
 import { useSpeechRecognition, isWebSpeechSupported } from '@/hooks/useSpeechRecognition';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 import { useBluetooth } from '@/hooks/useBluetooth';
-// @ts-ignore - expo-audio types may not expose these members in this toolchain
-import { Audio } from 'expo-audio';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { historyApi } from '@/api/history';
 import { updatePreferences } from '@/api/user';
 import { useRouter } from 'expo-router';
@@ -72,37 +71,25 @@ async function playAudio(audioBase64: string) {
     }
   } else {
     try {
-      // Guard: expo-audio is not available in Expo Go; avoid native crash
-      if (!Audio || typeof (Audio as any).setAudioModeAsync !== 'function' || typeof (Audio as any).createAudioPlayer !== 'function') {
-        console.warn('[TTS] expo-audio not available on this platform; skipping native playback');
-        return;
-      }
-
-      await (Audio as any).setAudioModeAsync({
-        playsInSilentModeIOS: true,
-        allowsRecordingIOS: true,
-        staysActiveInBackground: false,
-        // Access interruption modes off Audio to avoid TS type issues
-        interruptionModeIOS: (Audio as any)?.InterruptionModeIOS?.DoNotMix,
-        interruptionModeAndroid: (Audio as any)?.InterruptionModeAndroid?.DoNotMix,
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: true,
+        interruptionMode: 'doNotMix',
         shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: true,
       });
 
-      const player = (Audio as any).createAudioPlayer({
+      const player = createAudioPlayer({
         uri: 'data:audio/mp3;base64,' + audioBase64,
       });
 
       player.play();
 
-      // Best-effort cleanup: release player after a short delay
+      // Best-effort cleanup after some time
       setTimeout(() => {
         try {
-          player.remove();
-        } catch {
-          // ignore
-        }
-      }, 60000);
+          player.release?.();
+        } catch {}
+      }, 60_000);
     } catch (e) {
       console.error('[TTS] native audio play error:', e);
     }
@@ -590,10 +577,13 @@ export default function App() {
             });
           }
         },
-        () => showAlert(
-          'Microphone Blocked',
-          'Allow microphone access:\n1. Click the lock icon\n2. Set Microphone → Allow\n3. Refresh the page',
-        ),
+        () =>
+          showAlert(
+            'Microphone Blocked',
+            Platform.OS === 'web'
+              ? 'Allow microphone access:\n1. Click the lock icon\n2. Set Microphone → Allow\n3. Refresh the page'
+              : 'Microphone access is blocked. Please:\n1. Open system app settings\n2. Find Voice Bridge\n3. Enable microphone permission\n4. Restart the app',
+          ),
       );
     }
 

@@ -1,11 +1,9 @@
 import { useRef, useCallback } from 'react';
 import { Platform } from 'react-native';
 import {
-  Audio,
-  AudioModule,
-  InterruptionModeAndroid,
-  InterruptionModeIOS,
   RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
   useAudioRecorder as useExpoAudioRecorder,
 } from 'expo-audio';
 import * as FileSystemLegacy from 'expo-file-system/legacy';
@@ -14,6 +12,8 @@ const CYCLE_MS = 4000; // record 4-second chunks, send each to Google STT
 
 export function useAudioRecorder() {
   const activeRef = useRef(false);
+  // Use expo-audio built-in high quality preset for native;
+  // web path below still uses getUserMedia + MediaRecorder.
   const recorder = useExpoAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -36,28 +36,18 @@ export function useAudioRecorder() {
     onDenied?: () => void,
   ) {
     try {
-      // Guard: expo-audio is not available in Expo Go
-      if (!AudioModule || typeof AudioModule.requestRecordingPermissionsAsync !== 'function' || !Audio || typeof Audio.setAudioModeAsync !== 'function') {
-        console.warn('[AudioRecorder] expo-audio not available on this platform; skipping native recording');
-        onDenied?.();
-        return;
-      }
-
-      const permission = await AudioModule.requestRecordingPermissionsAsync();
+      const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
         console.warn('[AudioRecorder] Permission denied');
         onDenied?.();
         return;
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: true,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        // SDK 55: use cross-platform string interruptionMode (replaces platform enums)
+        interruptionMode: 'doNotMix',
       });
 
       activeRef.current = true;
@@ -81,8 +71,8 @@ export function useAudioRecorder() {
 
         try {
           await recorder.stop();
-          const status = await recorder.getStatusAsync();
-          const uri = status?.uri;
+          // expo-audio (SDK 55): recording file path is exposed on recorder.uri
+          const uri = (recorder as any)?.uri as string | undefined;
           
           if (uri) {
             // Use legacy API for expo-file-system SDK 54+
@@ -91,11 +81,13 @@ export function useAudioRecorder() {
             });
             
             console.log('[AudioRecorder] Native chunk ready, size:', base64.length);
-            // RecordingPresets.HIGH_QUALITY defaults to AAC/linear formats; backend must accept these mime types
+            // HIGH_QUALITY preset records AAC/M4A by default
             const mimeType = Platform.OS === 'android' ? 'audio/m4a' : 'audio/m4a';
             onChunk(base64, mimeType);
             
             await FileSystemLegacy.deleteAsync(uri, { idempotent: true });
+          } else {
+            console.warn('[AudioRecorder] No URI after stop(); skipping chunk');
           }
 
           runNativeCycle(onChunk);
