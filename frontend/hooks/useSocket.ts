@@ -16,7 +16,7 @@ function getBackendUrl(): string {
   }
 
   // 2) Default: use deployed backend origin
-  return 'https://voice-bridge-gules.vercel.app';
+  return 'https://voice-bridge-backend-xq5w.onrender.com';
 }
 
 // Module-level singleton — one socket for the entire app lifetime

@@ -136,7 +136,7 @@ export function initSocket(httpServer) {
           !origin ||
           origin.startsWith('http://localhost:') ||
           origin.startsWith('http://127.0.0.1:') ||
-          origin.startsWith('https://voice-bridge-gules.vercel.app')
+          origin.startsWith('https://voice-bridge-backend-xq5w.onrender.com')
         ) {
           return cb(null, true);
         }
