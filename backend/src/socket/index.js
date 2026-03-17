@@ -135,7 +135,8 @@ export function initSocket(httpServer) {
         if (
           !origin ||
           origin.startsWith('http://localhost:') ||
-          origin.startsWith('http://127.0.0.1:')
+          origin.startsWith('http://127.0.0.1:') ||
+          origin.startsWith('https://voice-bridge-gules.vercel.app')
         ) {
           return cb(null, true);
         }
@@ -375,6 +376,7 @@ export function initSocket(httpServer) {
 
     // ── create-meeting ────────────────────────────────────────────────────────
     socket.on('create-meeting', ({ meetingId, hostSpeakLang, hostHearLang, invitees }) => {
+      console.log("OK")
       const hostUserId = socket.data.userId;
       if (!hostUserId) {
         socket.emit('meeting-error', { message: 'Not registered.' });

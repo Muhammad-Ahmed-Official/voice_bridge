@@ -1,22 +1,22 @@
 import { useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
-import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
 function getBackendUrl(): string {
-  if (Platform.OS === 'web') {
-    return 'http://localhost:3000';
+  // 1) If EXPO_PUBLIC_API_URL is set, derive socket origin from it
+  if (process.env.EXPO_PUBLIC_API_URL) {
+    try {
+      const url = new URL(process.env.EXPO_PUBLIC_API_URL);
+      const origin = `${url.protocol}//${url.host}`;
+      console.log('[Socket] Using backend from EXPO_PUBLIC_API_URL:', origin);
+      return origin;
+    } catch {
+      // fall through
+    }
   }
 
-  // For mobile: extract IP from Expo's hostUri (e.g., "192.168.0.105:8081")
-  const hostUri = Constants.expoConfig?.hostUri;
-  if (hostUri) {
-    const ip = hostUri.split(':')[0];
-    console.log('[Socket] Using backend IP:', ip);
-    return `http://${ip}:3000`;
-  }
-
-  return 'http://localhost:3000';
+  // 2) Default: use deployed backend origin
+  return 'https://voice-bridge-gules.vercel.app';
 }
 
 // Module-level singleton — one socket for the entire app lifetime
