@@ -13,7 +13,7 @@ import {
 import { useAuth } from '@/contexts/AuthContext';
 import { useSocket } from '@/hooks/useSocket';
 import { useSpeechRecognition, isWebSpeechSupported } from '@/hooks/useSpeechRecognition';
-import { useAudioRecorder } from '@/hooks/useAudioRecorder';
+import { useVADAudioRecorder } from '@/hooks/useVADAudioRecorder';
 import { useBluetooth } from '@/hooks/useBluetooth';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { historyApi } from '@/api/history';
@@ -57,7 +57,13 @@ function speakText(text: string, locale: string) {
 
 // Play base64 MP3 audio from Google Cloud TTS
 // Web: native HTMLAudioElement; Native: expo-audio player
-async function playAudio(audioBase64: string) {
+// onStart: called just before playback begins (use to mute mic)
+// onEnd:   called when playback finishes or errors (use to unmute mic)
+async function playAudio(
+  audioBase64: string,
+  onStart?: () => void,
+  onEnd?: () => void,
+) {
   if (!audioBase64) return;
   console.log('[TTS] playAudio called, bytes:', audioBase64.length);
 
@@ -65,33 +71,53 @@ async function playAudio(audioBase64: string) {
     if (typeof window === 'undefined') return;
     try {
       const audio = new window.Audio('data:audio/mp3;base64,' + audioBase64);
+      audio.addEventListener('ended', () => onEnd?.(), { once: true });
+      audio.addEventListener('error', () => onEnd?.(), { once: true });
+      onStart?.();
       await audio.play();
     } catch (e: any) {
       console.error('[TTS] web audio play error:', e);
+      onEnd?.();
     }
   } else {
     try {
+      // FIX #6: removed invalid `shouldDuckAndroid` (not a valid AudioMode field
+      // in expo-audio; was silently ignored but is cleaner without it)
       await setAudioModeAsync({
         playsInSilentMode: true,
         allowsRecording: true,
         interruptionMode: 'doNotMix',
-        shouldDuckAndroid: true,
       });
 
       const player = createAudioPlayer({
         uri: 'data:audio/mp3;base64,' + audioBase64,
       });
 
+      onStart?.();
       player.play();
 
-      // Best-effort cleanup after some time
-      setTimeout(() => {
-        try {
-          player.release?.();
-        } catch {}
-      }, 60_000);
+      // Detect playback completion via status updates; fall back to a long timeout
+      let ended = false;
+      const markEnded = () => {
+        if (ended) return;
+        ended = true;
+        onEnd?.();
+        try { player.remove?.(); } catch {}
+      };
+
+      // expo-audio AudioPlayer emits 'playbackStatusUpdate' with { didJustFinish }
+      const sub = player.addListener('playbackStatusUpdate', (status) => {
+        if (status?.didJustFinish) {
+          sub.remove();
+          markEnded();
+        }
+      });
+
+      // Safety net: release after 60 s regardless
+      setTimeout(markEnded, 60_000);
     } catch (e) {
       console.error('[TTS] native audio play error:', e);
+      onEnd?.();
     }
   }
 }
@@ -204,7 +230,7 @@ export default function App() {
 
   const { socket } = useSocket(user?.userId ?? null, user?._id ?? null);
   const { startListening, stopListening } = useSpeechRecognition();
-  const { startRecording, stopRecording } = useAudioRecorder();
+  const { startRecording, stopRecording, setTtsPlaying, warmUpAudio } = useVADAudioRecorder();
   const { devices: btDevices, isScanning: btScanning, scanError: btScanError, startScan: btStartScan, stopScan: btStopScan, isBleSupported } = useBluetooth();
 
   // Track which STT mode is being used: 'browser' | 'audio-recorder' | null
@@ -260,7 +286,7 @@ export default function App() {
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState<Record<number, string>>({});
   // State for Incoming Call Popup
- const [incomingCall, setIncomingCall] = useState<{callerName: string, callerId: string} | null>(null);
+  const [incomingCall, setIncomingCall] = useState<{callerName: string, callerId: string} | null>(null);
 
   useEffect(() => {
     let interval: any;
@@ -301,9 +327,9 @@ export default function App() {
       peerHearLang: string;
     }) => {
       setRoomId(rid);
-      
-      // If we just accepted a call (incomingCall exists), use the popup-selected values
-      // Otherwise (we are the caller), use the main state values
+
+      // incomingCall being set means we are the callee; use popup-selected langs.
+      // Otherwise we are the caller; use the setup-screen langs.
       const mySpeakLang = incomingCall ? callInviteSpeakLang : speakLang;
       const myHearLang = incomingCall ? callInviteHearLang : hearLang;
       
@@ -469,7 +495,7 @@ export default function App() {
       socket.off('discoverable-users', onDiscoverableUsers);
       socket.off('translation-error', onTranslationError);
     };
-  }, [socket, user, speakLang, hearLang, stopRecording, stopListening]);
+  }, [socket, user, speakLang, hearLang, incomingCall, callInviteSpeakLang, callInviteHearLang, stopRecording, stopListening]);
 
   // ── Discoverable mode: emit start/stop based on screen ───────────────────
   useEffect(() => {
@@ -487,11 +513,22 @@ export default function App() {
   useEffect(() => {
     if (!socket) return;
 
+    // Early gate: backend emits tts-start right before sending translated-text with audio.
+    // Pause the mic immediately so the VAD loop doesn't capture the incoming TTS.
+    const onTtsStart = () => {
+      setTtsPlaying(true);
+    };
+    socket.on('tts-start', onTtsStart);
+
     const onTranslatedText = ({ text, audioBase64 }: { text: string; audioBase64?: string }) => {
       console.log('[pipeline] translated-text received:', text, 'isSpeaker:', isSpeakerRef.current);
       if (isSpeakerRef.current) {
         if (audioBase64) {
-          playAudio(audioBase64);
+          playAudio(
+            audioBase64,
+            () => setTtsPlaying(true),
+            () => { setTtsPlaying(false); socket.emit('tts-end'); },
+          );
         } else if (Platform.OS === 'web') {
           speakText(text, LOCALE_MAP[hearLangRef.current]);
         }
@@ -515,7 +552,11 @@ export default function App() {
       if (idx === -1) return;
       if (isSpeakerRef.current) {
         if (audioBase64) {
-          playAudio(audioBase64);
+          playAudio(
+            audioBase64,
+            () => setTtsPlaying(true),
+            () => { setTtsPlaying(false); socket.emit('tts-end'); },
+          );
         } else if (Platform.OS === 'web') {
           speakText(text, LOCALE_MAP[hearLangRef.current]);
         }
@@ -530,12 +571,13 @@ export default function App() {
     socket.on('meeting-speech-transcript', onMeetingSpeechTranscript);
 
     return () => {
+      socket.off('tts-start', onTtsStart);
       socket.off('translated-text', onTranslatedText);
       socket.off('speech-transcript', onSpeechTranscript);
       socket.off('meeting-translated', onMeetingTranslated);
       socket.off('meeting-speech-transcript', onMeetingSpeechTranscript);
     };
-  }, [socket]); // refs keep values fresh — no stale closure risk
+  }, [socket, setTtsPlaying]); // setTtsPlaying is stable (useCallback); refs keep other values fresh
 
   // ── Hybrid Audio Capture ────────────────────────────────────────────────────
   // For languages supported by Web Speech API (EN, AR): use browser STT
@@ -562,16 +604,25 @@ export default function App() {
       
       startRecording(
         (audioBase64: string, mimeType: string) => {
-          console.log('[pipeline] Sending audio chunk to backend for STT');
+          const roomId = roomIdRef.current;
+          const meetingId = meetingIdRef.current;
+          console.log(
+            `[pipeline] Audio chunk ready — bytes:${audioBase64.length} mime:${mimeType}` +
+            ` roomId:${roomId} meetingMode:${isMeetingModeRef.current}`,
+          );
           if (isMeetingModeRef.current) {
             socket?.emit('meeting-audio-chunk', {
-              meetingId: meetingIdRef.current,
+              meetingId,
               audioBase64,
               mimeType,
             });
           } else {
+            if (!roomId) {
+              console.warn('[pipeline] Dropping audio chunk — roomId is null (call not yet established)');
+              return;
+            }
             socket?.emit('audio-chunk', {
-              roomId: roomIdRef.current,
+              roomId,
               audioBase64,
               mimeType,
             });
@@ -795,10 +846,11 @@ export default function App() {
               <TouchableOpacity
                 style={[styles.actionCircle, { backgroundColor: THEME.success }]}
                 onPress={() => {
+                  warmUpAudio(); // pre-create AudioContext in user-gesture frame
                   // Update global state with selected languages before accepting
                   setSpeakLang(callInviteSpeakLang);
                   setHearLang(callInviteHearLang);
-                  
+
                   socket?.emit('accept-call', {
                     callerId: incomingCall.callerId,
                     speakLang: callInviteSpeakLang,
@@ -975,6 +1027,11 @@ export default function App() {
                         showAlert('Error', 'Please enter the target user ID.');
                         return;
                       }
+                      if (targetId === user?.userId) {
+                        showAlert('Error', 'You cannot call yourself.');
+                        return;
+                      }
+                      warmUpAudio(); // pre-create AudioContext in user-gesture frame
                       setCallState('calling');
                       socket?.emit('call-user', {
                         targetUserId: targetId,
@@ -991,6 +1048,7 @@ export default function App() {
                         showAlert('Error', `Please enter ${participants - 1} participant ID(s).`);
                         return;
                       }
+                      warmUpAudio(); // pre-create AudioContext in user-gesture frame
                       const generatedMeetingId = `mt_${user?.userId}_${Date.now()}`;
                       const invitees = ids.slice(0, participants - 1).map(uid => ({
                         userId: uid,
@@ -1007,6 +1065,7 @@ export default function App() {
                     }
 
                     // Original behavior for as-setup
+                    warmUpAudio(); // pre-create AudioContext in user-gesture frame
                     let config: any[] = [];
                     config.push({ userId: user.userId || 'You', speak: speakLang, hear: hearLang });
                     if (screen === 'as-setup') {
@@ -1033,6 +1092,36 @@ export default function App() {
             ) : (
               <Bluetooth size={36} color={THEME.primary} />
             )}
+          </View>
+
+          {/* Language selectors for BT calls */}
+          <View style={{ paddingHorizontal: 20, paddingBottom: 8 }}>
+            <Text style={styles.labelDark}>I WILL SPEAK</Text>
+            <View style={styles.langRow}>
+              {LANGUAGES.map(l => (
+                <TouchableOpacity
+                  key={'bts' + l.code}
+                  onPress={() => setSpeakLang(l.code)}
+                  style={[styles.langSelect, speakLang === l.code && styles.langSelectActive]}
+                >
+                  <Text style={styles.flag}>{l.flag}</Text>
+                  <Text style={[styles.langName, speakLang === l.code && styles.langNameActive]}>{l.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={[styles.labelDark, { marginTop: 10 }]}>I WANT TO HEAR</Text>
+            <View style={styles.langRow}>
+              {LANGUAGES.map(l => (
+                <TouchableOpacity
+                  key={'bth' + l.code}
+                  onPress={() => setHearLang(l.code)}
+                  style={[styles.langSelect, hearLang === l.code && styles.langSelectActive]}
+                >
+                  <Text style={styles.flag}>{l.flag}</Text>
+                  <Text style={[styles.langName, hearLang === l.code && styles.langNameActive]}>{l.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
 
           {(() => {

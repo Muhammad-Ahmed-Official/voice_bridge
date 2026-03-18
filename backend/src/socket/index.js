@@ -30,12 +30,23 @@ import { getTtsForUser } from '../services/tts.js';
 
 const LOCALE_MAP = { UR: 'ur-PK', EN: 'en-US', AR: 'ar-SA' };
 
-// Text buffering system to batch transcripts before translation
-// This reduces API calls by accumulating speech before translating
-const textBuffers = new Map(); // key: `${roomId}_${socketId}` -> { text: '', timeout: null, speakLang, toLang, other, ttsLocale }
-const BUFFER_DELAY_MS = 2000; // Wait 2 seconds of silence before translating
+// ── Pipeline state maps ───────────────────────────────────────────────────────
 
-// Rooms that are in the process of being cleaned up (graceful shutdown)
+// Text buffering: accumulate STT results before translating (reduces API calls)
+// key: `${roomId}_${socketId}` → { text, timeout }
+const textBuffers = new Map();
+const BUFFER_DELAY_MS = 1500; // flush after 1.5s of silence
+
+// STT deduplication: reject new chunk if one is already in-flight for this socket.
+// Prevents duplicate STT requests when two chunks arrive faster than STT responds.
+// key: socketId → true
+const sttInFlight = new Map();
+
+// TTS delivery tracking: tells the RECEIVER client when to gate its microphone.
+// key: receiverSocketId → true
+const ttsInFlight = new Map();
+
+// Rooms being gracefully torn down
 const roomsClosing = new Set();
 
 function broadcastDiscoverableList(io) {
@@ -49,70 +60,116 @@ function broadcastDiscoverableList(io) {
 }
 
 /**
- * Buffer text and translate after silence period
- * Reduces translation API calls by batching multiple STT results
+ * resolveLanguages
+ *
+ * Single source of truth for STT/TTS language selection.
+ *
+ *   STT lang  = the SPEAKER's speakLang  (what they are saying)
+ *   TTS lang  = the RECEIVER's hearLang  (what they want to hear)
+ *   Translate = speakLang → hearLang
+ *
+ * @param {object} room   - Room object from roomManager
+ * @param {string} senderSocketId
+ * @returns {{ sttLocale, ttsLocale, speakLang, hearLang, other }}
  */
-function bufferAndTranslate(io, socket, roomId, text, speakLang, toLang, other, ttsLocale) {
+function resolveLanguages(room, senderSocketId) {
+  const isUserA = room.userA.socketId === senderSocketId;
+  const speaker = isUserA ? room.userA : room.userB;
+  const receiver = isUserA ? room.userB : room.userA;
+
+  const speakLang = speaker.speakLang;   // e.g. 'EN'
+  const hearLang  = receiver.hearLang;   // e.g. 'UR'
+
+  const sttLocale = LOCALE_MAP[speakLang] ?? 'en-US'; // for Google STT
+  const ttsLocale = LOCALE_MAP[hearLang]  ?? 'en-US'; // for TTS synthesis
+
+  return { sttLocale, ttsLocale, speakLang, hearLang, receiver };
+}
+
+/**
+ * bufferAndTranslate
+ *
+ * Accumulates STT results until BUFFER_DELAY_MS of silence, then:
+ *   1. Translates accumulated text  (speakLang → hearLang)
+ *   2. Synthesises TTS audio        (in hearLang)
+ *   3. Notifies receiver to PAUSE microphone  (tts-start)
+ *   4. Delivers audio to receiver
+ *   5. Receiver will ACK tts-end after playback → resumes its mic
+ */
+function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale) {
   const key = `${roomId}_${socket.id}`;
   const buffer = textBuffers.get(key) || { text: '', timeout: null };
-  
-  // Clear existing timeout
+
   if (buffer.timeout) clearTimeout(buffer.timeout);
-  
-  // Accumulate text with space separator
   buffer.text = buffer.text ? `${buffer.text} ${text}` : text;
-  
-  // Set new timeout - translate after silence period
+
   buffer.timeout = setTimeout(async () => {
     const fullText = buffer.text.trim();
     textBuffers.delete(key);
-    
     if (!fullText) return;
-    
-    // Check if room is still valid
+
     const room = getRoom(roomId);
-    if (!room || roomsClosing.has(roomId)) {
-      console.log(`[Buffer] Room ${roomId} closed, discarding buffered text`);
-      return;
-    }
-    
-    console.log(`\n========== BUFFERED TRANSLATION ==========`);
-    console.log(`[Speaker] ${socket.data.userId}`);
-    console.log(`[Buffered Text] "${fullText}"`);
-    console.log(`[Translate] ${speakLang} → ${toLang}`);
-    
+    if (!room || roomsClosing.has(roomId)) return;
+
+    console.log(`\n[Pipeline] ${socket.data.userId} → "${fullText}" (${speakLang}→${hearLang})`);
+
     try {
-      const result = await translateText(fullText, speakLang, toLang);
-      
-      // Check if translation actually succeeded
+      // ── 1. Translate ──────────────────────────────────────────────────────
+      const result = await translateText(fullText, speakLang, hearLang);
       if (!result.success) {
-        console.warn(`[Pipeline] Translation failed, skipping TTS`);
         socket.emit('translation-error', { text: fullText, error: 'Translation unavailable' });
-        console.log(`==========================================\n`);
         return;
       }
-      
-      console.log(`[Translated] "${result.text}"`);
-      console.log(`[TTS] Language: ${toLang} (${ttsLocale})`);
-      console.log(`[Receiver] ${other.userId}`);
-      console.log(`==========================================\n`);
-      
+      console.log(`[Pipeline] Translated: "${result.text}" (${ttsLocale})`);
+
+      // ── 2. Synthesise TTS ─────────────────────────────────────────────────
+      // FIX #4: wrap in .catch() so a TTS failure (network error, rate limit,
+      // API outage) does NOT prevent the translated text from reaching the receiver.
+      // Previously, a TTS throw would propagate to the outer catch and the receiver
+      // would get nothing — not even the text.
       const ttsAudio = await getTtsForUser({
         text: result.text,
-        locale: ttsLocale,
+        locale: ttsLocale,                  // ← receiver's hearLang locale
         speakerUserId: socket.data.userId,
+      }).catch((err) => {
+        console.warn('[Pipeline] TTS failed, delivering text-only to receiver:', err.message);
+        return null;
       });
-      io.to(other.socketId).emit('translated-text', {
+
+      // ── 3. Signal receiver to PAUSE microphone before playing audio ───────
+      //    This is the primary feedback-loop prevention mechanism on the backend.
+      //    Frontend should set isTtsPlaying=true on tts-start and clear on tts-end.
+      if (ttsAudio) {
+        ttsInFlight.set(receiver.socketId, true);
+        io.to(receiver.socketId).emit('tts-start', { fromUserId: socket.data.userId });
+
+        // FIX #5: Auto-clear ttsInFlight after 60 s as a safety net in case
+        // the receiver client never sends tts-end (crash, hidden tab, network loss).
+        // Without this, the user is permanently blocked from speaking.
+        setTimeout(() => {
+          if (ttsInFlight.get(receiver.socketId)) {
+            ttsInFlight.delete(receiver.socketId);
+            console.log(`[TTS] Auto-cleared ttsInFlight for ${receiver.userId} (60 s safety timeout)`);
+          }
+        }, 60_000);
+      }
+
+      // ── 4. Deliver translated audio to receiver ───────────────────────────
+      io.to(receiver.socketId).emit('translated-text', {
         text: result.text,
         audioBase64: ttsAudio,
         fromUserId: socket.data.userId,
       });
+
+      // Echo raw transcript to the speaker's own tile
+      socket.emit('speech-transcript', { text: fullText });
+
     } catch (err) {
-      console.error('[Buffered Pipeline Error]', err.message);
+      console.error('[Pipeline Error]', err.message);
       socket.emit('translation-error', { text: fullText, error: err.message });
     }
   }, BUFFER_DELAY_MS);
-  
+
   textBuffers.set(key, buffer);
 }
 
@@ -173,6 +230,11 @@ export function initSocket(httpServer) {
 
     // ── call-user ────────────────────────────────────────────────────────────
     socket.on('call-user', ({ targetUserId, callerName, speakLang, hearLang }) => {
+      // Prevent self-calling
+      if (targetUserId === socket.data.userId) {
+        socket.emit('call-error', { message: 'You cannot call yourself.' });
+        return;
+      }
       const targetSocketId = getSocketIdForUser(targetUserId);
       if (!targetSocketId) {
         socket.emit('call-error', { message: `User "${targetUserId}" is not online.` });
@@ -259,96 +321,112 @@ export function initSocket(httpServer) {
       }
     });
 
-    // ── speech-text → translate → peer ───────────────────────────────────────
+    // ── speech-text → translate → TTS → peer ─────────────────────────────────
+    // Used when the client sends text directly (typed input fallback).
+    // Language routing: same resolveLanguages() rules apply.
     socket.on('speech-text', async ({ roomId, text }) => {
-      console.log(`[pipeline] speech-text received from ${socket.data.userId}: "${text}"`);
-
       const room = getRoom(roomId);
-      if (!room) { console.warn('[pipeline] room not found:', roomId); return; }
+      if (!room) return;
 
-      const other = getOtherParticipant(roomId, socket.id);
-      if (!other) { console.warn('[pipeline] other participant not found'); return; }
-
-      const isUserA = room.userA.socketId === socket.id;
-      const fromLang = isUserA ? room.userA.speakLang : room.userB.speakLang;
-      const toLang   = isUserA ? room.userB.hearLang  : room.userA.hearLang;
-
-      console.log(`[pipeline] translating "${text}" from ${fromLang} → ${toLang}`);
+      const { ttsLocale, speakLang, hearLang, receiver } =
+        resolveLanguages(room, socket.id);
 
       try {
-        const result = await translateText(text, fromLang, toLang);
-        
-        // Skip TTS if translation failed
+        const result = await translateText(text, speakLang, hearLang);
         if (!result.success) {
-          console.warn('[pipeline] Translation failed, skipping TTS');
           socket.emit('translation-error', { text, error: 'Translation unavailable' });
           return;
         }
-        
-        console.log(`[pipeline] translated: "${result.text}" → emitting to ${other.userId}`);
-        const locale = LOCALE_MAP[toLang] ?? 'en-US';
-        let audioBase64 = null;
-        try {
-          audioBase64 = await getTtsForUser({
-            text: result.text,
-            locale,
-            speakerUserId: socket.data.userId,
-          });
-        } catch (ttsErr) {
-          console.warn('[TTS] skipped (blocked/unavailable):', ttsErr.message);
-        }
-        io.to(other.socketId).emit('translated-text', {
+
+        const ttsAudio = await getTtsForUser({
           text: result.text,
-          audioBase64,
+          locale: ttsLocale,
+          speakerUserId: socket.data.userId,
+        }).catch(() => null);
+
+        if (ttsAudio) {
+          ttsInFlight.set(receiver.socketId, true);
+          io.to(receiver.socketId).emit('tts-start', { fromUserId: socket.data.userId });
+        }
+
+        io.to(receiver.socketId).emit('translated-text', {
+          text: result.text,
+          audioBase64: ttsAudio,
           fromUserId: socket.data.userId,
         });
       } catch (err) {
-        console.error('[translate] error:', err.message);
+        console.error('[speech-text error]', err.message);
         socket.emit('translation-error', { text, error: err.message });
       }
     });
 
-    // ── audio-chunk → Google STT → buffer → translate → peer ─────────────────
-    // Frontend sends 4-second audio blobs (base64). Backend transcribes with
-    // Google Cloud Speech-to-Text, buffers text, then translates and forwards to peer.
+    // ── audio-chunk → STT → buffer → translate → TTS → peer ─────────────────
+    //
+    // Security / quality gates applied in order:
+    //   1. Reject if room is closing
+    //   2. Reject duplicate: if a previous STT call is still in-flight for this
+    //      socket, skip — the VAD recorder already sends one segment per utterance
+    //      but network retries or overlapping segments would cause duplicates.
+    //   3. Run Google STT with the SPEAKER's language (speakLang)
+    //   4. Buffer and translate using resolveLanguages() — STT lang ≠ TTS lang
+    //   5. TTS uses the RECEIVER's hearLang (enforced in bufferAndTranslate)
     socket.on('audio-chunk', async ({ roomId, audioBase64, mimeType }) => {
-      // Skip if room is closing
-      if (roomsClosing.has(roomId)) {
-        console.log(`[Audio] Room ${roomId} is closing, ignoring chunk`);
+      // ── Debug: log every received chunk so we can confirm audio is arriving ─
+      console.log(`[STT] audio-chunk received from ${socket.data.userId} | roomId=${roomId} | mimeType=${mimeType} | bytes=${audioBase64?.length ?? 0}`);
+
+      if (!roomId) { console.warn('[STT] audio-chunk missing roomId from', socket.data.userId); return; }
+      if (roomsClosing.has(roomId)) return;
+
+      const room = getRoom(roomId);
+      if (!room) { console.warn('[STT] room not found:', roomId, '— user:', socket.data.userId); return; }
+
+      // ── Gate 1: STT deduplication ─────────────────────────────────────────
+      // Drop the incoming chunk if we are still waiting for a previous STT
+      // result from this same user. This prevents the pipeline from stacking up
+      // parallel STT calls when audio arrives faster than the API responds.
+      if (sttInFlight.get(socket.id)) {
+        console.log(`[STT] Skipping chunk for ${socket.data.userId} — previous STT in-flight`);
         return;
       }
-      
-      // Debug log to confirm audio chunk received
-      console.log(`[Audio] Received chunk from ${socket.data.userId}: ${mimeType}, size: ${audioBase64?.length || 0}`);
-      
-      const room = getRoom(roomId);
-      if (!room) { console.warn('[Google STT] room not found:', roomId); return; }
 
-      const other = getOtherParticipant(roomId, socket.id);
-      if (!other) { console.warn('[Google STT] peer not found'); return; }
+      // ── Gate 2: Do not process if this user's TTS is currently playing ────
+      // (belt-and-suspenders: the client VAD hook already gates this, but we
+      //  also enforce server-side in case of a race or legacy client build)
+      if (ttsInFlight.get(socket.id)) {
+        console.log(`[STT] Skipping chunk for ${socket.data.userId} — receiver is playing TTS`);
+        return;
+      }
 
-      const isUserA    = room.userA.socketId === socket.id;
-      const speakLang  = isUserA ? room.userA.speakLang : room.userB.speakLang;
-      const toLang     = isUserA ? room.userB.hearLang  : room.userA.hearLang;
+      // ── Resolve language routing ──────────────────────────────────────────
+      const { sttLocale, ttsLocale, speakLang, hearLang, receiver } =
+        resolveLanguages(room, socket.id);
 
-      const languageCode = LOCALE_MAP[speakLang] ?? 'en-US';
-      const ttsLocale = LOCALE_MAP[toLang] ?? 'en-US';
-
+      sttInFlight.set(socket.id, true);
       try {
-        const text = await transcribeAudio(audioBase64, languageCode, mimeType);
-        if (!text.trim()) return; // silence / nothing heard
+        // ── STT: always uses the SPEAKER's language ───────────────────────
+        const text = await transcribeAudio(audioBase64, sttLocale, mimeType);
+        if (!text.trim()) return; // pure silence chunk — discard
 
-        console.log(`[STT] ${socket.data.userId}: "${text}" (${speakLang})`);
+        console.log(`[STT] ${socket.data.userId}: "${text}" lang=${speakLang}(${sttLocale})`);
 
-        // Echo raw transcript back to sender so they see what was recognised
+        // Show raw transcript on speaker's own tile immediately
         socket.emit('speech-transcript', { text });
 
-        // Buffer text and translate after silence period
-        // This reduces translation API calls significantly
-        bufferAndTranslate(io, socket, roomId, text, speakLang, toLang, other, ttsLocale);
+        // ── Buffer → Translate → TTS (uses RECEIVER's hearLang) ──────────
+        bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale);
+
       } catch (err) {
         console.error('[STT Error]', err.message);
+      } finally {
+        sttInFlight.delete(socket.id);
       }
+    });
+
+    // ── tts-end: receiver signals playback finished → re-enable its mic ──────
+    // Frontend calls this after the TTS audio element fires 'ended'.
+    socket.on('tts-end', () => {
+      ttsInFlight.delete(socket.id);
+      console.log(`[TTS] Receiver ${socket.data.userId} finished playback — mic re-enabled`);
     });
 
     // ── end-call ──────────────────────────────────────────────────────────────
@@ -626,6 +704,9 @@ export function initSocket(httpServer) {
         unregisterUser(userId);
         removeDiscoverableUser(userId);
       }
+      // Clean up pipeline state maps so stale entries don't block future connections
+      sttInFlight.delete(socket.id);
+      ttsInFlight.delete(socket.id);
       broadcastDiscoverableList(io);
 
       const roomId = getRoomForSocket(socket.id);

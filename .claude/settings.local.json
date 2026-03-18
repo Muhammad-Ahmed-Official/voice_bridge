@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"const t = require\\(''''./node_modules/expo-audio''''\\); console.log\\(Object.keys\\(t\\)\\)\")"
+    ]
+  }
+}
