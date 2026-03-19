@@ -221,6 +221,8 @@ export default function App() {
   const [cloningEnabled, setCloningEnabled] = useState(
     !!user?.voiceCloningEnabled,
   );
+  // 'idle' | 'buffering' | 'cloning' | 'ready' | 'failed'
+  const [cloneStatus, setCloneStatus] = useState<'idle' | 'buffering' | 'cloning' | 'ready' | 'failed'>('idle');
   const [participantIds, setParticipantIds] = useState('');
   const [activeConfig, setActiveConfig] = useState<any>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -299,6 +301,7 @@ export default function App() {
       setLiveTranscript({});
       setIsMuted(false);
       setIsSpeaker(true);
+      setCloneStatus('idle');
     }
     return () => clearInterval(interval);
   }, [screen]);
@@ -352,11 +355,12 @@ export default function App() {
       // Stop recording immediately to prevent sending audio to deleted room
       stopRecording();
       stopListening();
-      
+
       // History is saved by the user who initiates end-call, not here
       setCallStartTime(null);
       setRoomId(null);
       setCallState('idle');
+      setCloneStatus('idle');
       setScreen('home');
     };
     
@@ -459,6 +463,15 @@ export default function App() {
     socket.on('discoverable-users', onDiscoverableUsers);
     socket.on('translation-error', onTranslationError);
 
+    // ── Voice Cloning status events ───────────────────────────────────────────
+    const onCloneStarted = () => setCloneStatus('buffering');
+    const onCloneReady   = () => setCloneStatus('ready');
+    const onCloneFailed  = () => setCloneStatus('failed');
+
+    socket.on('clone-started', onCloneStarted);
+    socket.on('clone-ready',   onCloneReady);
+    socket.on('clone-failed',  onCloneFailed);
+
     // When the socket reconnects the backend has already deleted the room
     // (via the disconnect handler). The reconnecting client never receives
     // peer-disconnected, so without this it would keep sending stale audio
@@ -471,6 +484,7 @@ export default function App() {
         setCallState('idle');
         setScreen('home');
         setActiveConfig(null);
+        setCloneStatus('idle');
         showAlert('Call Ended', 'Connection was lost.');
       }
     };
@@ -494,6 +508,9 @@ export default function App() {
       socket.off('call-error', onCallError);
       socket.off('discoverable-users', onDiscoverableUsers);
       socket.off('translation-error', onTranslationError);
+      socket.off('clone-started', onCloneStarted);
+      socket.off('clone-ready',   onCloneReady);
+      socket.off('clone-failed',  onCloneFailed);
     };
   }, [socket, user, speakLang, hearLang, incomingCall, callInviteSpeakLang, callInviteHearLang, stopRecording, stopListening]);
 
@@ -684,7 +701,21 @@ export default function App() {
               {sttMode === 'browser' ? '🎤 LISTENING' : '🎙️ RECORDING'}
             </Text>
           )}
-          {cloningEnabled && <Text style={styles.cloningStatusLabel}>AI CLONE ACTIVE</Text>}
+          {cloningEnabled && (
+            <Text style={[
+              styles.cloningStatusLabel,
+              cloneStatus === 'buffering' && { color: THEME.primary },
+              cloneStatus === 'cloning'   && { color: '#F59E0B' },
+              cloneStatus === 'ready'     && { color: THEME.success },
+              cloneStatus === 'failed'    && { color: THEME.danger },
+            ]}>
+              {cloneStatus === 'buffering' ? '● SAMPLING VOICE…'
+                : cloneStatus === 'cloning' ? '⟳ CLONING VOICE…'
+                : cloneStatus === 'ready'   ? '✓ AI CLONE ACTIVE'
+                : cloneStatus === 'failed'  ? '⚠ CLONE FAILED — DEFAULT TTS'
+                : 'AI CLONE ACTIVE'}
+            </Text>
+          )}
         </View>
       </View>
 
@@ -692,8 +723,16 @@ export default function App() {
         {activeConfig?.map((p: any, i: number) => (
           <View key={i} style={[styles.participantTile, i === 0 && styles.tileActive]}>
             <View style={styles.tileTopRow}>
-               <View style={[styles.avatarBox, i === 0 && cloningEnabled && { backgroundColor: 'rgba(16, 185, 129, 0.2)' }]}>
-                {i === 0 && cloningEnabled ? <Mic size={24} color={THEME.success} /> : <Text style={styles.avatarLetter}>{p.userId?.charAt(0) || 'U'}</Text>}
+               <View style={[
+                styles.avatarBox,
+                i === 0 && cloningEnabled && cloneStatus === 'ready'     && { backgroundColor: 'rgba(16, 185, 129, 0.2)' },
+                i === 0 && cloningEnabled && cloneStatus === 'buffering' && { backgroundColor: 'rgba(6, 182, 212, 0.2)' },
+                i === 0 && cloningEnabled && cloneStatus === 'cloning'   && { backgroundColor: 'rgba(245, 158, 11, 0.2)' },
+                i === 0 && cloningEnabled && cloneStatus === 'failed'    && { backgroundColor: 'rgba(244, 63, 94, 0.2)' },
+              ]}>
+                {i === 0 && cloningEnabled && cloneStatus === 'ready'
+                  ? <Mic size={24} color={THEME.success} />
+                  : <Text style={styles.avatarLetter}>{p.userId?.charAt(0) || 'U'}</Text>}
               </View>
               {i === 0 && isMuted && <MicOff size={16} color={THEME.danger} />}
             </View>

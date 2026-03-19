@@ -9,7 +9,7 @@ const getApiUrl = () => {
   }
 
   // 2) Default: always use deployed backend
-  return "https://voice-bridge-backend-xq5w.onrender.com/api/v1/";
+  return "http://localhost:3000/api/v1/";
 };
 
 export const axiosInstance = axios.create({

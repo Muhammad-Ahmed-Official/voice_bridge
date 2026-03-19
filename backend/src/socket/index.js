@@ -27,6 +27,14 @@ import {
 import { translateText } from '../services/translate.js';
 import { transcribeAudio } from '../services/stt.js';
 import { getTtsForUser } from '../services/tts.js';
+import {
+  initCloneBuffer,
+  addChunkToCloneBuffer,
+  getCloneState,
+  performVoiceClone,
+  clearCloneBuffer,
+} from '../services/voiceCloning.js';
+import { User } from '../models/user.models.js';
 
 const LOCALE_MAP = { UR: 'ur-PK', EN: 'en-US', AR: 'ar-SA' };
 
@@ -251,7 +259,7 @@ export function initSocket(httpServer) {
     });
 
     // ── accept-call ──────────────────────────────────────────────────────────
-    socket.on('accept-call', ({ callerId, speakLang, hearLang }) => {
+    socket.on('accept-call', async ({ callerId, speakLang, hearLang }) => {
       const callerSocketId = getSocketIdForUser(callerId);
       if (!callerSocketId) {
         socket.emit('call-error', { message: 'Caller is no longer online.' });
@@ -291,6 +299,35 @@ export function initSocket(httpServer) {
       removeDiscoverableUser(callerId);
       removeDiscoverableUser(socket.data.userId);
       broadcastDiscoverableList(io);
+
+      // ── Voice Cloning: init buffers for users who have it enabled ────────
+      try {
+        const [userADoc, userBDoc] = await Promise.all([
+          User.findOne({ userId: callerId }).lean(),
+          User.findOne({ userId: socket.data.userId }).lean(),
+        ]);
+
+        if (userADoc?.voiceCloningEnabled) {
+          initCloneBuffer(callerSocketId, callerId);
+          io.to(callerSocketId).emit('clone-started', {
+            status: 'buffering',
+            message: 'Recording your voice for cloning (10 s)…',
+          });
+          console.log(`[VoiceClone] Cloning ON for caller ${callerId}`);
+        }
+
+        if (userBDoc?.voiceCloningEnabled) {
+          initCloneBuffer(socket.id, socket.data.userId);
+          socket.emit('clone-started', {
+            status: 'buffering',
+            message: 'Recording your voice for cloning (10 s)…',
+          });
+          console.log(`[VoiceClone] Cloning ON for callee ${socket.data.userId}`);
+        }
+      } catch (cloneInitErr) {
+        // Non-fatal — call still proceeds with default TTS
+        console.warn('[VoiceClone] Could not init clone buffer:', cloneInitErr.message);
+      }
 
       // Notify caller
       io.to(callerSocketId).emit('call-accepted', {
@@ -364,12 +401,14 @@ export function initSocket(httpServer) {
     //
     // Security / quality gates applied in order:
     //   1. Reject if room is closing
-    //   2. Reject duplicate: if a previous STT call is still in-flight for this
+    //   2. Buffer audio for voice cloning (runs BEFORE STT gates so we capture
+    //      all speech even when STT is temporarily skipped)
+    //   3. Reject duplicate: if a previous STT call is still in-flight for this
     //      socket, skip — the VAD recorder already sends one segment per utterance
     //      but network retries or overlapping segments would cause duplicates.
-    //   3. Run Google STT with the SPEAKER's language (speakLang)
-    //   4. Buffer and translate using resolveLanguages() — STT lang ≠ TTS lang
-    //   5. TTS uses the RECEIVER's hearLang (enforced in bufferAndTranslate)
+    //   4. Run Google STT with the SPEAKER's language (speakLang)
+    //   5. Buffer and translate using resolveLanguages() — STT lang ≠ TTS lang
+    //   6. TTS uses the RECEIVER's hearLang (enforced in bufferAndTranslate)
     socket.on('audio-chunk', async ({ roomId, audioBase64, mimeType }) => {
       // ── Debug: log every received chunk so we can confirm audio is arriving ─
       console.log(`[STT] audio-chunk received from ${socket.data.userId} | roomId=${roomId} | mimeType=${mimeType} | bytes=${audioBase64?.length ?? 0}`);
@@ -379,6 +418,32 @@ export function initSocket(httpServer) {
 
       const room = getRoom(roomId);
       if (!room) { console.warn('[STT] room not found:', roomId, '— user:', socket.data.userId); return; }
+
+      // ── Voice Cloning: buffer audio BEFORE STT gates ─────────────────────
+      // We buffer even if STT is skipped so the full 10-second window is filled
+      // with real speech rather than just the first non-gated segment.
+      const cloneState = getCloneState(socket.id);
+      if (cloneState?.status === 'buffering' && audioBase64) {
+        const readyToClone = addChunkToCloneBuffer(socket.id, audioBase64, mimeType);
+
+        if (readyToClone) {
+          // Trigger cloning asynchronously — do not block the audio pipeline
+          performVoiceClone(socket.id)
+            .then((voiceId) => {
+              socket.emit('clone-ready', {
+                status:  'ready',
+                voiceId,
+                message: 'Your voice has been cloned! Using cloned voice for translations.',
+              });
+            })
+            .catch((err) => {
+              socket.emit('clone-failed', {
+                status:  'failed',
+                message: `Voice cloning failed: ${err.message}. Using default TTS voice.`,
+              });
+            });
+        }
+      }
 
       // ── Gate 1: STT deduplication ─────────────────────────────────────────
       // Drop the incoming chunk if we are still waiting for a previous STT
@@ -433,16 +498,20 @@ export function initSocket(httpServer) {
     socket.on('end-call', ({ roomId }) => {
       const room = getRoom(roomId);
       if (!room) return;
-      
+
       // Mark room as closing to stop processing new audio
       roomsClosing.add(roomId);
-      
+
+      // Clear voice clone buffers for both participants
+      clearCloneBuffer(room.userA.socketId);
+      clearCloneBuffer(room.userB.socketId);
+
       // Notify both users that call is ending
       io.to(room.userA.socketId).emit('call-ended', { roomId });
       io.to(room.userB.socketId).emit('call-ended', { roomId });
-      
+
       console.log(`[socket] call ending: ${roomId}`);
-      
+
       // Wait for any in-flight audio pipelines to complete, then cleanup
       setTimeout(() => {
         clearRoomBuffers(roomId);
@@ -707,6 +776,7 @@ export function initSocket(httpServer) {
       // Clean up pipeline state maps so stale entries don't block future connections
       sttInFlight.delete(socket.id);
       ttsInFlight.delete(socket.id);
+      clearCloneBuffer(socket.id); // clean up any in-progress voice clone buffer
       broadcastDiscoverableList(io);
 
       const roomId = getRoomForSocket(socket.id);

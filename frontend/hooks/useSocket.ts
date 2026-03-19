@@ -16,8 +16,8 @@ function getBackendUrl(): string {
   }
 
   // 2) Default: use deployed backend origin
-  return 'https://voice-bridge-backend-xq5w.onrender.com';
-  // return 'http://localhost:3000';
+  // return 'https://voice-bridge-backend-xq5w.onrender.com';
+  return 'http://localhost:3000';
 }
 
 // Module-level singleton — one socket for the entire app lifetime

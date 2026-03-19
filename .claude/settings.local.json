@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node -e \"const t = require\\(''''./node_modules/expo-audio''''\\); console.log\\(Object.keys\\(t\\)\\)\")"
+      "Bash(node -e \"const t = require\\(''''./node_modules/expo-audio''''\\); console.log\\(Object.keys\\(t\\)\\)\")",
+      "Bash(npm install:*)"
     ]
   }
 }
