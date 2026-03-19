@@ -62,13 +62,16 @@ async function synthesizeWithElevenLabsRest(text, voiceId) {
  */
 export function synthesizeWithElevenLabsStream(text, voiceId, onChunk, onDone, onError) {
   if (!text?.trim() || !voiceId || !ELEVENLABS_API_KEY) {
-    onError?.(new Error('[ElevenLabs Stream] Missing text, voiceId, or API key'));
+    const missing = !ELEVENLABS_API_KEY ? 'API key' : !voiceId ? 'voiceId' : 'text';
+    onError?.(new Error(`[ElevenLabs Stream] Missing ${missing}`));
     return () => {};
   }
 
   // eleven_turbo_v2_5 gives the lowest latency for real-time use;
   // fall back to eleven_multilingual_v2 if env is set to that.
   const modelId = ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
+
+  console.log(`[ElevenLabs] Opening WS stream — voice_id=${voiceId} model=${modelId} text="${text.substring(0, 40)}…"`);
 
   const wsUrl =
     `wss://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream-input` +

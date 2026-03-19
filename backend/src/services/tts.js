@@ -25,7 +25,7 @@ export async function synthesizeSpeech(text, locale) {
   }
 
   const lang = LANG_MAP[locale] ?? 'en';
-  
+
   try {
     // For long text, google-tts-api can split into multiple parts
     // Each part max 200 chars
@@ -35,7 +35,7 @@ export async function synthesizeSpeech(text, locale) {
         slow: false,
         host: 'https://translate.google.com',
       });
-      
+
       // Fetch all audio parts and combine
       const audioBuffers = await Promise.all(
         allParts.map(async (part) => {
@@ -44,86 +44,131 @@ export async function synthesizeSpeech(text, locale) {
           return Buffer.from(arrayBuffer);
         }),
       );
-      
+
       const combined = Buffer.concat(audioBuffers);
-      console.log(`[TTS] Synthesized ${text.length} chars in ${allParts.length} parts (${lang})`);
+      console.log(`[TTS] Google TTS: ${text.length} chars in ${allParts.length} parts (${lang})`);
       return combined.toString('base64');
     } else {
-      // Short text - single request
       const url = googleTTS.getAudioUrl(text, {
         lang,
         slow: false,
         host: 'https://translate.google.com',
       });
-      
+
       const res = await fetch(url);
       const arrayBuffer = await res.arrayBuffer();
       const base64 = Buffer.from(arrayBuffer).toString('base64');
-      
+
       console.log(
-        `[TTS] Synthesized: "${text.substring(0, 50)}${
-          text.length > 50 ? '...' : ''
-        }" (${lang})`,
+        `[TTS] Google TTS: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}" (${lang})`,
       );
       return base64;
     }
   } catch (err) {
-    console.error('[TTS] Error:', err.message);
+    console.error('[TTS] Google TTS error:', err.message);
     throw err;
   }
 }
 
 /**
- * Decide at runtime whether to use ElevenLabs (if enabled for the speaker)
- * or fall back to the existing Google-based TTS.
+ * Decide at runtime whether to use ElevenLabs (cloned or default voice)
+ * or fall back to Google TTS.
  *
  * @param {Object} params
  * @param {string} params.text
- * @param {string} params.locale - Target locale for the listener (e.g. 'ur-PK').
- * @param {string} params.speakerUserId - Logical userId of the speaker.
+ * @param {string} params.locale          - Target locale for the listener.
+ * @param {string} params.speakerUserId   - Logical userId of the speaker.
+ * @param {string} [params.clonedVoiceId] - In-memory cloned voice_id if clone is ready.
+ *                                          Bypasses DB lookup and avoids the DB write race.
  * @returns {Promise<string|null>} Base64-encoded MP3 audio.
  */
-export async function getTtsForUser({ text, locale, speakerUserId }) {
+export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId }) {
   if (!text || !text.trim()) return null;
 
-  // First, attempt ElevenLabs if the speaker has cloning enabled
+  // ── Path A: In-memory cloned voice_id provided (fastest, no DB round-trip) ─
+  // This is set by the socket handler once performVoiceClone() succeeds.
+  // Using the in-memory value avoids the window between DB write and replica read.
+  if (clonedVoiceId) {
+    try {
+      const audio = await synthesizeWithElevenLabs(text, locale, clonedVoiceId);
+      if (audio) {
+        console.log(
+          `[TTS Router] ✅ CLONED VOICE (in-memory) — speaker=${speakerUserId} voice_id=${clonedVoiceId}`,
+        );
+        return audio;
+      }
+    } catch (err) {
+      console.warn(
+        `[TTS Router] ⚠️  ElevenLabs cloned voice failed (voice_id=${clonedVoiceId}), ` +
+        `falling back to Google TTS: ${err.message}`,
+      );
+    }
+    // Fall through to Google TTS if ElevenLabs fails even with cloned id
+    return synthesizeSpeech(text, locale);
+  }
+
+  // ── Path B: DB lookup — used when no in-memory voiceId provided ────────────
   if (speakerUserId) {
     try {
       const user = await User.findOne({ userId: speakerUserId }).lean();
       const cloningEnabled = !!user?.voiceCloningEnabled;
-      const voiceId =
-        (user && typeof user.voiceId === 'string' && user.voiceId) ||
-        ELEVENLABS_DEFAULT_VOICE_ID;
 
-      if (cloningEnabled && voiceId) {
+      // Only use a voiceId that is explicitly stored for THIS user (their clone).
+      // Do NOT fall through to ELEVENLABS_DEFAULT_VOICE_ID here — if the user has
+      // cloning enabled but hasn't finished the clone yet, use Google TTS instead.
+      // Using the default voice would make the user think cloning is "working"
+      // when it's actually serving a generic ElevenLabs voice.
+      const clonedDbVoiceId =
+        user && typeof user.voiceId === 'string' && user.voiceId.length > 0
+          ? user.voiceId
+          : null;
+
+      if (cloningEnabled && clonedDbVoiceId) {
         try {
-          const elevenAudio = await synthesizeWithElevenLabs(
-            text,
-            locale,
-            voiceId,
-          );
-          if (elevenAudio) {
+          const audio = await synthesizeWithElevenLabs(text, locale, clonedDbVoiceId);
+          if (audio) {
             console.log(
-              `[TTS Router] Using ElevenLabs for speaker=${speakerUserId}`,
+              `[TTS Router] ✅ CLONED VOICE (from DB) — speaker=${speakerUserId} voice_id=${clonedDbVoiceId}`,
             );
-            return elevenAudio;
+            return audio;
           }
         } catch (err) {
           console.warn(
-            '[TTS Router] ElevenLabs failed, falling back to Google TTS:',
-            err.message,
+            `[TTS Router] ⚠️  ElevenLabs (DB voice_id=${clonedDbVoiceId}) failed, ` +
+            `falling back to Google TTS: ${err.message}`,
           );
+        }
+      } else if (cloningEnabled && !clonedDbVoiceId) {
+        // Cloning is enabled but clone is not ready yet — use Google TTS
+        // (NOT the default ElevenLabs voice, which would look identical to a working clone)
+        console.log(
+          `[TTS Router] ⏳ CLONE PENDING — speaker=${speakerUserId} using Google TTS until clone ready`,
+        );
+        return synthesizeSpeech(text, locale);
+      } else if (!cloningEnabled && ELEVENLABS_DEFAULT_VOICE_ID) {
+        // Cloning toggle OFF but a default ElevenLabs voice is configured:
+        // honour it for non-cloning users who still want ElevenLabs TTS quality.
+        try {
+          const audio = await synthesizeWithElevenLabs(text, locale, ELEVENLABS_DEFAULT_VOICE_ID);
+          if (audio) {
+            console.log(
+              `[TTS Router] 🔊 DEFAULT ELEVENLABS VOICE — speaker=${speakerUserId} voice_id=${ELEVENLABS_DEFAULT_VOICE_ID}`,
+            );
+            return audio;
+          }
+        } catch (err) {
+          console.warn('[TTS Router] Default ElevenLabs voice failed, falling back to Google TTS:', err.message);
         }
       }
     } catch (err) {
       console.warn(
-        '[TTS Router] Failed to read user preferences, falling back:',
+        '[TTS Router] Failed to read user preferences, falling back to Google TTS:',
         err.message,
       );
     }
   }
 
-  // Fallback: existing Google TTS
-  return await synthesizeSpeech(text, locale);
+  // ── Path C: Google TTS fallback ────────────────────────────────────────────
+  console.log(`[TTS Router] 🔤 GOOGLE TTS — speaker=${speakerUserId ?? 'unknown'} locale=${locale}`);
+  return synthesizeSpeech(text, locale);
 }
-

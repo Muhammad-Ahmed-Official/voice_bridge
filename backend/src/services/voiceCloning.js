@@ -16,8 +16,11 @@ import { User } from '../models/user.models.js';
 // val: { chunks: Buffer[], mimeType, startTime, userId, status, voiceId }
 const cloneBuffers = new Map();
 
-const CLONE_WINDOW_MS = 10_000; // collect 10 s of wall-clock audio
-const MIN_CHUNKS      = 2;      // need at least 2 segments for a usable sample
+// ElevenLabs IVC recommends ≥30 s of speech. We use 20 s wall-clock which
+// typically yields 12-16 s of voiced audio after VAD silence removal.
+// This is a notable improvement over 10 s without making the first clone wait too long.
+const CLONE_WINDOW_MS = 20_000; // collect 20 s of wall-clock audio
+const MIN_CHUNKS      = 3;      // need at least 3 segments for a usable sample
 
 // ── Public API ───────────────────────────────────────────────────────────────
 

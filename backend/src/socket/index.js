@@ -104,7 +104,7 @@ function resolveLanguages(room, senderSocketId) {
  *   4. Delivers audio to receiver
  *   5. Receiver will ACK tts-end after playback → resumes its mic
  */
-function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale) {
+function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, clonedVoiceId) {
   const key = `${roomId}_${socket.id}`;
   const buffer = textBuffers.get(key) || { text: '', timeout: null };
 
@@ -131,14 +131,13 @@ function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, recei
       console.log(`[Pipeline] Translated: "${result.text}" (${ttsLocale})`);
 
       // ── 2. Synthesise TTS ─────────────────────────────────────────────────
-      // FIX #4: wrap in .catch() so a TTS failure (network error, rate limit,
-      // API outage) does NOT prevent the translated text from reaching the receiver.
-      // Previously, a TTS throw would propagate to the outer catch and the receiver
-      // would get nothing — not even the text.
+      // Pass clonedVoiceId from in-memory state so TTS can use it immediately
+      // without a DB round-trip (avoids race between DB write and replica read).
       const ttsAudio = await getTtsForUser({
-        text: result.text,
-        locale: ttsLocale,                  // ← receiver's hearLang locale
+        text:          result.text,
+        locale:        ttsLocale,           // ← receiver's hearLang locale
         speakerUserId: socket.data.userId,
+        clonedVoiceId,                      // ← in-memory clone id (may be null)
       }).catch((err) => {
         console.warn('[Pipeline] TTS failed, delivering text-only to receiver:', err.message);
         return null;
@@ -197,11 +196,21 @@ export function initSocket(httpServer) {
   const io = new Server(httpServer, {
     cors: {
       origin: (origin, cb) => {
+        // Allow:
+        //  • no origin (curl, Postman, React Native fetch which sends no Origin)
+        //  • localhost / 127.0.0.1 (web dev server)
+        //  • any 192.168.x.x / 10.x.x.x LAN address (Expo Go on physical device)
+        //  • deployed domains
+        if (!origin) return cb(null, true);
         if (
-          !origin ||
-          origin.startsWith('http://localhost:') ||
-          origin.startsWith('http://127.0.0.1:') ||
-          origin.startsWith('https://voice-bridge-backend-xq5w.onrender.com')
+          origin.startsWith('http://localhost:')     ||
+          origin.startsWith('http://127.0.0.1:')     ||
+          origin.startsWith('https://voice-bridge-backend-xq5w.onrender.com') 
+          // ||
+          // // LAN ranges used by Expo Go on a physical device
+          // /^https?:\/\/192\.168\.\d+\.\d+/.test(origin) ||
+          // /^https?:\/\/10\.\d+\.\d+\.\d+/.test(origin)  ||
+          // /^https?:\/\/172\.(1[6-9]|2\d|3[01])\.\d+\.\d+/.test(origin)
         ) {
           return cb(null, true);
         }
@@ -376,9 +385,10 @@ export function initSocket(httpServer) {
         }
 
         const ttsAudio = await getTtsForUser({
-          text: result.text,
-          locale: ttsLocale,
+          text:          result.text,
+          locale:        ttsLocale,
           speakerUserId: socket.data.userId,
+          clonedVoiceId: getClonedVoiceId(socket.id),
         }).catch(() => null);
 
         if (ttsAudio) {
@@ -478,7 +488,10 @@ export function initSocket(httpServer) {
         socket.emit('speech-transcript', { text });
 
         // ── Buffer → Translate → TTS (uses RECEIVER's hearLang) ──────────
-        bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale);
+        // Pass the in-memory cloned voiceId (null if clone not ready yet).
+        // This is more up-to-date than MongoDB when clone just finished.
+        const currentCloneVoiceId = getClonedVoiceId(socket.id);
+        bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, currentCloneVoiceId);
 
       } catch (err) {
         console.error('[STT Error]', err.message);
