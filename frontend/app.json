@@ -19,8 +19,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.axplicit.voicebridge",
-      "permissions": [],
-      "usesCleartextTraffic": true
+      "permissions": []
     },
     "web": {
       "output": "static",
