@@ -151,6 +151,7 @@ export async function performVoiceClone(socketId) {
     await User.findOneAndUpdate(
       { userId: state.userId },
       { $set: { voiceId } },
+      { returnDocument: 'after' },
     );
 
     state.status  = 'ready';

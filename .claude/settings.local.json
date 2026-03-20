@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\(''''version''''\\)\\); print\\(d.get\\(''''description'''',''''''''\\)[:100]\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''version:'''', d.get\\(''''version''''\\)\\); print\\(''''peerDeps:'''', json.dumps\\(d.get\\(''''peerDependencies'''',{}\\), indent=2\\)\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''main:'''', d.get\\(''''main''''\\)\\); print\\(''''source:'''', d.get\\(''''source''''\\)\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); deps=d.get\\(''''dependencies'''',{}\\); print\\(json.dumps\\({k:v for k,v in deps.items\\(\\)}, indent=2\\)\\)\")"
+    ]
+  }
+}
