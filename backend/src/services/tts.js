@@ -145,20 +145,14 @@ export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId
           `[TTS Router] ⏳ CLONE PENDING — speaker=${speakerUserId} using Google TTS until clone ready`,
         );
         return synthesizeSpeech(text, locale);
-      } else if (!cloningEnabled && ELEVENLABS_DEFAULT_VOICE_ID) {
-        // Cloning toggle OFF but a default ElevenLabs voice is configured:
-        // honour it for non-cloning users who still want ElevenLabs TTS quality.
-        try {
-          const audio = await synthesizeWithElevenLabs(text, locale, ELEVENLABS_DEFAULT_VOICE_ID);
-          if (audio) {
-            console.log(
-              `[TTS Router] 🔊 DEFAULT ELEVENLABS VOICE — speaker=${speakerUserId} voice_id=${ELEVENLABS_DEFAULT_VOICE_ID}`,
-            );
-            return audio;
-          }
-        } catch (err) {
-          console.warn('[TTS Router] Default ElevenLabs voice failed, falling back to Google TTS:', err.message);
-        }
+      } else if (!cloningEnabled) {
+        // Cloning toggle OFF → always use Google TTS.
+        // Do NOT route through ELEVENLABS_DEFAULT_VOICE_ID here: that would
+        // synthesize in a random ElevenLabs voice with no relation to the
+        // actual speaker, which is misleading and indistinguishable from a
+        // "working" clone. Google TTS is the honest fallback when OFF.
+        console.log(`[TTS Router] 🔤 CLONING OFF — speaker=${speakerUserId} → Google TTS`);
+        return synthesizeSpeech(text, locale);
       }
     } catch (err) {
       console.warn(

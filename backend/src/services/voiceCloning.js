@@ -33,12 +33,13 @@ export function initCloneBuffer(socketId, userId) {
   cloneBuffers.delete(socketId);
 
   cloneBuffers.set(socketId, {
-    chunks:    [],
-    mimeType:  'audio/webm',
-    startTime: null,   // set on first chunk
+    chunks:      [],
+    mimeType:    'audio/webm',
+    startTime:   null,   // set on first chunk
     userId,
-    status:    'buffering', // 'buffering' | 'cloning' | 'ready' | 'failed'
-    voiceId:   null,
+    status:      'buffering', // 'buffering' | 'cloning' | 'ready' | 'failed'
+    voiceId:     null,
+    cloneTriggered: false,   // guard: prevent duplicate performVoiceClone calls
   });
 
   console.log(`[VoiceClone] Buffer initialised for user=${userId} socket=${socketId}`);
@@ -65,7 +66,15 @@ export function addChunkToCloneBuffer(socketId, audioBase64, mimeType) {
   state.chunks.push(Buffer.from(audioBase64, 'base64'));
 
   const elapsedMs = Date.now() - state.startTime;
-  return elapsedMs >= CLONE_WINDOW_MS && state.chunks.length >= MIN_CHUNKS;
+  const shouldTrigger =
+    elapsedMs >= CLONE_WINDOW_MS &&
+    state.chunks.length >= MIN_CHUNKS &&
+    !state.cloneTriggered;
+
+  if (shouldTrigger) {
+    state.cloneTriggered = true; // latch: only one caller gets true
+  }
+  return shouldTrigger;
 }
 
 /**

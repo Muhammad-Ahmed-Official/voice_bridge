@@ -105,7 +105,7 @@ function resolveLanguages(room, senderSocketId) {
  *   4. Delivers audio to receiver
  *   5. Receiver will ACK tts-end after playback → resumes its mic
  */
-function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, clonedVoiceId) {
+function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale) {
   const key = `${roomId}_${socket.id}`;
   const buffer = textBuffers.get(key) || { text: '', timeout: null };
 
@@ -132,13 +132,19 @@ function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, recei
       console.log(`[Pipeline] Translated: "${result.text}" (${ttsLocale})`);
 
       // ── 2. Synthesise TTS ─────────────────────────────────────────────────
-      // Pass clonedVoiceId from in-memory state so TTS can use it immediately
-      // without a DB round-trip (avoids race between DB write and replica read).
+      // Re-fetch clonedVoiceId here (not at call-time) so we always get the
+      // most current value. The clone may complete during the 1500 ms buffer
+      // window; capturing it at call-time would mean using a stale null.
+      const freshCloneVoiceId = getClonedVoiceId(socket.id);
+      if (freshCloneVoiceId) {
+        console.log(`[Pipeline] Using cloned voice_id=${freshCloneVoiceId} for ${socket.data.userId}`);
+      }
+
       const ttsAudio = await getTtsForUser({
         text:          result.text,
         locale:        ttsLocale,           // ← receiver's hearLang locale
         speakerUserId: socket.data.userId,
-        clonedVoiceId,                      // ← in-memory clone id (may be null)
+        clonedVoiceId: freshCloneVoiceId,   // ← always fresh at flush time
       }).catch((err) => {
         console.warn('[Pipeline] TTS failed, delivering text-only to receiver:', err.message);
         return null;
@@ -448,6 +454,9 @@ export function initSocket(httpServer) {
               });
             })
             .catch((err) => {
+              // Suppress "already in progress" — a concurrent call will emit clone-ready.
+              // Only surface real failures to the client.
+              if (err.message.includes('already in progress')) return;
               socket.emit('clone-failed', {
                 status:  'failed',
                 message: `Voice cloning failed: ${err.message}. Using default TTS voice.`,
@@ -489,10 +498,9 @@ export function initSocket(httpServer) {
         socket.emit('speech-transcript', { text });
 
         // ── Buffer → Translate → TTS (uses RECEIVER's hearLang) ──────────
-        // Pass the in-memory cloned voiceId (null if clone not ready yet).
-        // This is more up-to-date than MongoDB when clone just finished.
-        const currentCloneVoiceId = getClonedVoiceId(socket.id);
-        bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, currentCloneVoiceId);
+        // clonedVoiceId is resolved inside bufferAndTranslate at flush time
+        // to avoid capturing a stale null before the clone window completes.
+        bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale);
 
       } catch (err) {
         console.error('[STT Error]', err.message);
