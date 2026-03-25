@@ -1,6 +1,3 @@
-// In-memory meeting room state — cleared on server restart
-// meetingId → { hostId, hostSocketId, status, participants: Map<userId, entry> }
-// entry = { userId, socketId, speakLang, hearLang, status: 'invited'|'joined'|'left' }
 const meetingRooms = new Map();
 const socketMeetingMap = new Map(); // socketId → meetingId (O(1) disconnect lookup)
 
@@ -38,6 +35,7 @@ export function participantJoined(meetingId, userId, socketId, speakLang, hearLa
   entry.speakLang = speakLang;
   entry.hearLang = hearLang;
   entry.status = 'joined';
+  entry.voiceCloningEnabled = false; 
   socketMeetingMap.set(socketId, meetingId);
 }
 
@@ -83,7 +81,6 @@ export function deleteMeeting(meetingId) {
   room.participants.forEach((entry) => {
     if (entry.socketId) socketMeetingMap.delete(entry.socketId);
   });
-  // Also clean up host socket entry (already in participants, but guard anyway)
   socketMeetingMap.delete(room.hostSocketId);
   meetingRooms.delete(meetingId);
 }

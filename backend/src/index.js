@@ -4,7 +4,6 @@ import dotenv from "dotenv";
 import app from './app.js';
 import { initSocket } from './socket/index.js';
 
-// Load environment variables
 dotenv.config({ path: "./.env" });
 
 const PORT = process.env.PORT || 3000;
@@ -12,7 +11,6 @@ const PORT = process.env.PORT || 3000;
 const httpServer = createServer(app);
 initSocket(httpServer);
 
-// Database Connection and Server Start
 connectDB()
   .then(() => {
     httpServer.listen(PORT, () => {

@@ -1,10 +1,6 @@
 import WebSocket from 'ws';
-import {
-  ELEVENLABS_API_KEY,
-  ELEVENLABS_MODEL_ID,
-} from '../config/elevenlabs.config.js';
+import { ELEVENLABS_API_KEY, ELEVENLABS_MODEL_ID } from '../config/elevenlabs.config.js';
 
-// ── REST TTS (kept as internal fallback only) ─────────────────────────────────
 
 /**
  * Synthesize speech using ElevenLabs REST API.
@@ -41,7 +37,6 @@ async function synthesizeWithElevenLabsRest(text, voiceId) {
   return buf.toString('base64');
 }
 
-// ── WebSocket Streaming TTS ───────────────────────────────────────────────────
 
 /**
  * Synthesize speech using ElevenLabs WebSocket Streaming API (LOW LATENCY).
@@ -67,8 +62,6 @@ export function synthesizeWithElevenLabsStream(text, voiceId, onChunk, onDone, o
     return () => {};
   }
 
-  // eleven_turbo_v2_5 gives the lowest latency for real-time use;
-  // fall back to eleven_multilingual_v2 if env is set to that.
   const modelId = ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
 
   console.log(`[ElevenLabs] Opening WS stream — voice_id=${voiceId} model=${modelId} text="${text.substring(0, 40)}…"`);
@@ -105,22 +98,19 @@ export function synthesizeWithElevenLabsStream(text, voiceId, onChunk, onDone, o
 
   ws.on('open', () => {
     try {
-      // ── 1. BOS: authentication + voice settings ──────────────────────────
       ws.send(JSON.stringify({
-        text:           ' ',           // required non-empty first message
+        text: ' ',
         voice_settings: {
-          stability:        0.5,
-          similarity_boost: 0.8,
-          style:            0.0,
+          stability: 0.5,
+          similarity_boost: 0.95, 
+          style: 0.0,
           use_speaker_boost: true,
         },
         xi_api_key: ELEVENLABS_API_KEY,
       }));
 
-      // ── 2. Text payload ──────────────────────────────────────────────────
       ws.send(JSON.stringify({ text }));
 
-      // ── 3. EOS: flush the stream ─────────────────────────────────────────
       ws.send(JSON.stringify({ text: '' }));
     } catch (sendErr) {
       finish(sendErr);
@@ -132,7 +122,6 @@ export function synthesizeWithElevenLabsStream(text, voiceId, onChunk, onDone, o
       const msg = JSON.parse(raw.toString());
 
       if (msg.audio) {
-        // Each audio chunk is a base64-encoded MP3 fragment
         onChunk?.(msg.audio);
       }
 
@@ -150,15 +139,12 @@ export function synthesizeWithElevenLabsStream(text, voiceId, onChunk, onDone, o
   });
 
   ws.on('close', () => {
-    // Normal close — finish without error if not already done
     finish(null);
   });
 
-  // Return abort function for early cancellation
   return () => finish(new Error('[ElevenLabs Stream] Aborted'));
 }
 
-// ── Public synthesis helper ───────────────────────────────────────────────────
 
 /**
  * Synthesize speech using ElevenLabs, preferring WebSocket streaming.
@@ -173,7 +159,6 @@ export function synthesizeWithElevenLabsStream(text, voiceId, onChunk, onDone, o
 export async function synthesizeWithElevenLabs(text, locale, voiceId) {
   if (!text?.trim() || !voiceId || !ELEVENLABS_API_KEY) return null;
 
-  // ── Try WebSocket streaming first (lower latency) ─────────────────────────
   try {
     const base64Audio = await new Promise((resolve, reject) => {
       const parts = [];
@@ -203,7 +188,6 @@ export async function synthesizeWithElevenLabs(text, locale, voiceId) {
     );
   }
 
-  // ── REST fallback ─────────────────────────────────────────────────────────
   try {
     const audio = await synthesizeWithElevenLabsRest(text, voiceId);
     console.log(`[ElevenLabs] REST TTS complete for voiceId=${voiceId}`);

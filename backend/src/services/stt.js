@@ -1,25 +1,19 @@
 import { spawn } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
+import { translateText } from './translate.js';
 
 const GOOGLE_STT_URL = 'https://speech.googleapis.com/v1/speech:recognize';
 
-// mimeType → Google STT encoding config
-// Some formats need sampleRateHertz, others auto-detect from container
 const ENCODING_MAP = {
-  // WebM/Opus (browser path)
   'audio/webm':               { encoding: 'WEBM_OPUS' },
   'audio/webm;codecs=opus':   { encoding: 'WEBM_OPUS' },
-  // OGG/Opus
   'audio/ogg':                { encoding: 'OGG_OPUS' },
   'audio/ogg;codecs=opus':    { encoding: 'OGG_OPUS' },
-  // LINEAR16 PCM formats (raw PCM / WAV)
   'audio/l16':                { encoding: 'LINEAR16', sampleRateHertz: 16000 },
   'audio/l16;rate=16000':     { encoding: 'LINEAR16', sampleRateHertz: 16000 },
   'audio/wav':                { encoding: 'LINEAR16', sampleRateHertz: 16000 },
-  // AMR / AMR-WB formats
   'audio/amr-wb':             { encoding: 'AMR_WB', sampleRateHertz: 16000 },
   'audio/amr':                { encoding: 'AMR', sampleRateHertz: 8000 },
-  // M4A / AAC / MP3: let Google auto-detect encoding from container
   'audio/m4a':                {},
   'audio/mp4':                {},
   'audio/aac':                {},
@@ -28,38 +22,11 @@ const ENCODING_MAP = {
 
 // Languages that can use special models for better recognition
 const LANGUAGE_MODEL_MAP = {
-  // Urdu: use generic/default model (enhanced/\"latest_long\" not supported for ur-PK)
-  'ur-PK': 'default',
-  // Arabic & English can still use language-specific models where supported
-  'ar-SA': 'latest_long',
-  'en-US': 'latest_short',
+  'ur-PK': 'default',       // Best for Urdu (standard model)
+  'ar-SA': 'latest_long',   // High-accuracy model for Arabic
+  'en-US': 'latest_long',   // Best for conversational English
 };
 
-// For WEBM_OPUS / OGG_OPUS Google auto-detects the sample rate from the container,
-// so we must NOT include sampleRateHertz in the config.
-
-// ── M4A → LINEAR16 WAV conversion ────────────────────────────────────────────
-//
-// WHY spawn() instead of fluent-ffmpeg:
-//
-//   fluent-ffmpeg's .pipe() returns a PassThrough stream with no held reference.
-//   Node.js GC can collect it before data flows through, closing the output pipe
-//   mid-operation and triggering "Output stream closed".
-//
-//   Direct spawn with pipe:0 (stdin) → pipe:1 (stdout) keeps the pipes alive
-//   for the full lifetime of the child process — no intermediate stream objects,
-//   no GC hazard.
-//
-// WHY -f mp4 on the first attempt:
-//
-//   MediaRecorder native chunks ARE complete M4A/MP4 files (moov atom present).
-//   Telling ffmpeg the container format explicitly skips the format-probe step,
-//   which sometimes fails on short recordings or unusual encoder configurations.
-//
-// WHY a retry without -f mp4:
-//
-//   Some devices produce M4A with a slightly non-standard container that ffmpeg's
-//   MP4 demuxer rejects but the auto-prober handles correctly.
 
 /**
  * Run ffmpeg with the given args, feeding inputBuffer via stdin, returning stdout.
@@ -153,13 +120,7 @@ export async function transcribeAudio(
 
   const isFallback = options?.isFallback === true;
 
-  // M4A from native (Expo) clients must be converted to LINEAR16 WAV.
-  // Google STT v1 has no reliable M4A auto-detection; sending raw M4A
-  // without an explicit encoding field causes "bad encoding" errors.
-  //
-  // On conversion failure we THROW rather than falling through — sending
-  // unconverted M4A to Google STT is guaranteed to fail anyway, and the
-  // caller's finally block will cleanly release sttInFlight.
+ 
   if (mimeType === 'audio/m4a') {
     console.log('[STT] Converting audio/m4a → LINEAR16 WAV (16 kHz mono)');
     try {
@@ -167,26 +128,18 @@ export async function transcribeAudio(
       mimeType = 'audio/wav';
       console.log('[STT] M4A conversion OK');
     } catch (err) {
-      // Re-throw so the audio-chunk handler drops this chunk cleanly.
-      // sttInFlight is released in the handler's finally block.
       throw new Error(`M4A→WAV conversion failed — chunk skipped: ${err.message}`);
     }
   }
 
-  // Default: treat unknown as WebM Opus (Ahmed/web path). Known M4A/MP3 entries
-  // above intentionally map to an empty object so Google can auto-detect.
+  
   const encodingConfig = ENCODING_MAP[mimeType] ?? { encoding: 'WEBM_OPUS' };
 
-  // Choose model; fall back to "default" when language is unknown or we explicitly
-  // don't want to use an enhanced model (e.g. for container formats like M4A).
+
   let model = isFallback ? 'default' : (LANGUAGE_MODEL_MAP[languageCode] ?? 'default');
   let supportsEnhanced =
     !isFallback && (languageCode === 'en-US' || languageCode === 'ar-SA');
 
-  // For M4A/AAC we let Google auto-detect the encoding and also avoid
-  // forcing "latest_*" enhanced models, which can be strict about formats.
-  // After conversion above mimeType becomes audio/wav, so this branch will
-  // only apply if conversion failed and we are still sending M4A.
   if (mimeType === 'audio/m4a') {
     model = 'default';
     supportsEnhanced = false;
@@ -194,12 +147,16 @@ export async function transcribeAudio(
 
   console.log(`[STT] Processing: mimeType=${mimeType}, encoding=${encodingConfig.encoding}, lang=${languageCode}`);
 
+  // Modify the config object inside transcribeAudio
   const config = {
-    languageCode,
+    languageCode, // The primary language (e.g., 'ur-PK')
+    alternativeLanguageCodes: ['en-US', 'ar-SA'], // Add these as alternatives
     enableAutomaticPunctuation: true,
     model,
-    ...(supportsEnhanced ? { useEnhanced: true } : {}),
+    useEnhanced: true, // Use for EN and AR for better results
   };
+
+
 
   // Only set encoding when we explicitly know it; for M4A/MP3 we let Google infer.
   if (encodingConfig.encoding) {
@@ -250,12 +207,34 @@ export async function transcribeAudio(
     throw new Error(`Google STT API error ${data.error.code}: ${data.error.message}`);
   }
 
-  const transcript = data.results?.[0]?.alternatives?.[0]?.transcript ?? '';
+    // --- Find this part at the end of transcribeAudio ---
+    const transcript = data.results?.[0]?.alternatives?.[0]?.transcript ?? '';
+    if (transcript.trim()) {
+      console.log(`[STT] Recognized (${languageCode}): "${transcript}"`);
+      const targetLanguage = options?.targetLanguage || 'en-US'; 
   
-  // Only log non-empty transcripts to reduce noise
-  if (transcript.trim()) {
-    console.log(`[STT] Transcript (${languageCode}): "${transcript}"`);
-  }
-  
+      try {
+        const translationResult = await translateText(transcript, languageCode, targetLanguage);
+        if (translationResult.success) {
+          console.log(`[STT] Final Translated Text: "${translationResult.text}"`);
+          return translationResult.text; // This text goes to ElevenLabs
+        }
+      } catch (transError) {
+        console.error('[STT] Translation error, falling back to original:', transError.message);
+      }
+    }
   return transcript;
 }
+  
+  // const transcript = data.results?.[0]?.alternatives?.[0]?.transcript ?? '';
+  // // Only log non-empty transcripts to reduce noise
+  // if (transcript.trim()) {
+  //   console.log(`[STT] Transcript (${languageCode}): "${transcript}"`);
+  // }
+  // return transcript;
+    // const config = {
+  //   languageCode,
+  //   enableAutomaticPunctuation: true,
+  //   model,
+  //   ...(supportsEnhanced ? { useEnhanced: true } : {}),
+  // };

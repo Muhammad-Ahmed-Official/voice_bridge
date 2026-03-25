@@ -1,30 +1,11 @@
-/**
- * Voice Cloning Service
- *
- * Handles:
- *  - Per-socket audio buffering (first ~10 s of speech)
- *  - Instant Voice Cloning via ElevenLabs POST /v1/voices/add
- *  - voice_id persistence to MongoDB
- *  - Cleanup on call end / disconnect
- */
-
 import { ELEVENLABS_API_KEY } from '../config/elevenlabs.config.js';
 import { User } from '../models/user.models.js';
 
-// ── In-memory state ──────────────────────────────────────────────────────────
-// key: socketId
-// val: { chunks: Buffer[], mimeType, startTime, userId, status, voiceId,
-//        cloneTriggered, voiceLimitReached }
 const cloneBuffers = new Map();
 
-// Tracks which userIds currently have an active call.
-// deleteOldClonedVoice skips deletion when the user is in a call to prevent
-// 404 errors if a TTS request is in-flight using the about-to-be-deleted voice_id.
 const activeCallUsers = new Set();
 
-// Session-level set: userIds for which ElevenLabs voice limit has been hit.
-// Once a userId enters this set, NO further clone attempts are made for the
-// lifetime of this server process (the limit is account-wide, not per-call).
+
 const voiceLimitUsers = new Set();
 
 export function markUserCallActive(userId) {
@@ -35,24 +16,14 @@ export function markUserCallEnded(userId) {
   activeCallUsers.delete(userId);
 }
 
-// ElevenLabs IVC recommends ≥30 s of speech. We use 20 s wall-clock which
-// typically yields 12-16 s of voiced audio after VAD silence removal.
-// This is a notable improvement over 10 s without making the first clone wait too long.
-const CLONE_WINDOW_MS = 20_000; // collect 20 s of wall-clock audio
+
+const CLONE_WINDOW_MS = 45_000; // collect 20 s of wall-clock audio
 const MIN_CHUNKS      = 3;      // need at least 3 segments for a usable sample
 
-// ── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Start buffering audio for a socket.
- * Call this when a call is accepted and voiceCloningEnabled === true.
- */
 export function initCloneBuffer(socketId, userId) {
-  // Clear any leftover state (e.g. reconnect)
   cloneBuffers.delete(socketId);
 
-  // If this user already hit the ElevenLabs voice limit, start in 'failed'
-  // so the audio-chunk handler never attempts buffering or cloning again.
   const limitReached = voiceLimitUsers.has(userId);
 
   cloneBuffers.set(socketId, {
@@ -84,10 +55,8 @@ export function addChunkToCloneBuffer(socketId, audioBase64, mimeType) {
   const state = cloneBuffers.get(socketId);
   if (!state || state.status !== 'buffering') return false;
 
-  // Record start time and mime type from first chunk
   if (state.startTime === null) {
     state.startTime = Date.now();
-    // Normalise mime type: keep only the base type for the filename extension
     state.mimeType = mimeType ? mimeType.split(';')[0].trim() : 'audio/webm';
   }
 
@@ -105,16 +74,12 @@ export function addChunkToCloneBuffer(socketId, audioBase64, mimeType) {
   return shouldTrigger;
 }
 
-/**
- * Return the current clone state for a socket (or null).
- */
+
 export function getCloneState(socketId) {
   return cloneBuffers.get(socketId) ?? null;
 }
 
-/**
- * Return the cloned voice_id once ready (or null).
- */
+
 export function getClonedVoiceId(socketId) {
   return cloneBuffers.get(socketId)?.voiceId ?? null;
 }
@@ -144,24 +109,22 @@ export async function performVoiceClone(socketId) {
   state.status = 'cloning';
 
   try {
-    // ── Optionally delete old cloned voice to keep ElevenLabs library clean ──
     await deleteOldClonedVoice(state.userId);
 
-    // ── Build multipart form ──────────────────────────────────────────────────
-    // IMPORTANT: WebM/Opus is a streaming container. Individual VAD segments are
-    // NOT self-contained audio files — only the very first chunk carries the EBML
-    // header, codec parameters, and track metadata that ElevenLabs needs to decode
-    // the audio. Sending chunks as separate files gives ElevenLabs N−1 malformed
-    // blobs and causes cloning to fail or produce a garbage voice.
-    // Fix: concatenate ALL chunks into a single blob before uploading.
     const ext        = state.mimeType.includes('m4a') ? 'm4a' : 'webm';
     const totalBytes = state.chunks.reduce((a, b) => a + b.length, 0);
     const combined   = Buffer.concat(state.chunks);
-    const blob       = new Blob([combined], { type: state.mimeType });
+    // ADD THIS CHECK:
+    if (combined.length < 50000) { // Approx 50KB minimum for a decent sample
+      state.status = 'failed';
+      throw new Error('[VoiceClone] Audio sample too small for quality cloning');
+    }
+    const blob   = new Blob([combined], { type: state.mimeType });
 
     const formData = new FormData();
     formData.append('name',        `vc_${state.userId}_${Date.now()}`);
     formData.append('description', `Auto-cloned for ${state.userId}`);
+    formData.append('remove_background_noise', 'true'); // <--- ADD THIS LINE
     formData.append('files', blob, `voice_sample.${ext}`);
 
     console.log(
@@ -179,7 +142,6 @@ export async function performVoiceClone(socketId) {
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '(no body)');
-      // Detect account-level voice limit (permanent for this process)
       if (errText.includes('voice_limit_reached')) {
         state.voiceLimitReached = true;
         voiceLimitUsers.add(state.userId);
@@ -193,7 +155,6 @@ export async function performVoiceClone(socketId) {
     const voiceId = data.voice_id;
     if (!voiceId) throw new Error('ElevenLabs returned no voice_id');
 
-    // ── Persist to DB so TTS picks it up automatically ───────────────────────
     await User.findOneAndUpdate(
       { userId: state.userId },
       { $set: { voiceId } },
@@ -208,22 +169,16 @@ export async function performVoiceClone(socketId) {
 
   } catch (err) {
     state.status = 'failed';
-    // Use warn (not error) to avoid log spam; the caller decides whether to retry
     console.warn(`[VoiceClone] Failed for user=${state.userId}:`, err.message);
     throw err;
   }
 }
 
-/**
- * Reset a failed (or ready) clone buffer so a fresh collection window starts.
- * Call this to schedule an automatic retry after a transient clone failure.
- * Returns true if the buffer existed and was reset, false otherwise.
- */
+
 export function resetCloneBufferForRetry(socketId) {
   const state = cloneBuffers.get(socketId);
   if (!state) return false;
 
-  // Never retry if the account-level voice limit was hit — it won't resolve on retry.
   if (state.voiceLimitReached) {
     console.warn(`[VoiceClone] Skipping retry for user=${state.userId} — voice limit is permanent`);
     return false;
@@ -239,17 +194,12 @@ export function resetCloneBufferForRetry(socketId) {
   return true;
 }
 
-/**
- * Returns true if the ElevenLabs voice limit has been reached for this socket's user.
- * When true, no further cloning should be attempted.
- */
+
 export function isVoiceLimitReached(socketId) {
   return cloneBuffers.get(socketId)?.voiceLimitReached ?? false;
 }
 
-/**
- * Remove clone buffer for a socket (call on end-call / disconnect).
- */
+
 export function clearCloneBuffer(socketId) {
   if (cloneBuffers.has(socketId)) {
     cloneBuffers.delete(socketId);
@@ -257,19 +207,9 @@ export function clearCloneBuffer(socketId) {
   }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Delete the user's previously cloned voice from ElevenLabs to avoid
- * accumulating unused voices in the account library.
- * Silently ignores errors (old voice may already be gone).
- */
 async function deleteOldClonedVoice(userId) {
   if (!ELEVENLABS_API_KEY) return;
 
-  // Do not delete the voice while the user is in an active call.
-  // A TTS request for the old voice_id may be in-flight; deleting it now
-  // would cause a 404 from ElevenLabs and break audio for the receiver.
   if (activeCallUsers.has(userId)) {
     console.log(`[VoiceClone] Skipping voice deletion for ${userId} — active call in progress`);
     return;

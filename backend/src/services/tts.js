@@ -1,14 +1,14 @@
 import googleTTS from 'google-tts-api';
 import { User } from '../models/user.models.js';
 import { synthesizeWithElevenLabs } from './elevenlabsTts.js';
-// Note: ELEVENLABS_DEFAULT_VOICE_ID intentionally NOT imported — generic default
-// voices are never used here. If cloning is off or fails, Google TTS is the fallback.
 
-// Maps our internal locale codes to google-tts-api language codes
-const LANG_MAP = {
-  'ur-PK': 'ur',
-  'en-US': 'en',
+const LANG_MAP = { 
+  'ur-PK': 'ur', 
+  'en-US': 'en', 
   'ar-SA': 'ar',
+  'UR': 'ur', 
+  'EN': 'en', 
+  'AR': 'ar' 
 };
 
 /**
@@ -26,8 +26,6 @@ export async function synthesizeSpeech(text, locale) {
   const lang = LANG_MAP[locale] ?? 'en';
 
   try {
-    // For long text, google-tts-api can split into multiple parts
-    // Each part max 200 chars
     if (text.length > 200) {
       const allParts = googleTTS.getAllAudioUrls(text, {
         lang,
@@ -84,17 +82,11 @@ export async function synthesizeSpeech(text, locale) {
 export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId, cloningEnabled }) {
   if (!text || !text.trim()) return null;
 
-  // ── Fast path: cloning definitively OFF — skip DB lookup entirely ──────────
-  // cloningEnabled=false is passed by the audio pipeline when the room object
-  // already confirms the sender has cloning disabled. No need to re-read DB.
   if (!clonedVoiceId && cloningEnabled === false) {
     console.log(`[TTS Router] GOOGLE TTS (fast) — speaker=${speakerUserId} locale=${locale}`);
     return synthesizeSpeech(text, locale);
   }
 
-  // ── Path A: In-memory cloned voice_id provided (fastest, no DB round-trip) ─
-  // This is set by the socket handler once performVoiceClone() succeeds.
-  // Using the in-memory value avoids the window between DB write and replica read.
   if (clonedVoiceId) {
     try {
       const audio = await synthesizeWithElevenLabs(text, locale, clonedVoiceId);
@@ -110,21 +102,14 @@ export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId
         `falling back to Google TTS: ${err.message}`,
       );
     }
-    // Fall through to Google TTS if ElevenLabs fails even with cloned id
     return synthesizeSpeech(text, locale);
   }
 
-  // ── Path B: DB lookup — used when no in-memory voiceId provided ────────────
   if (speakerUserId) {
     try {
       const user = await User.findOne({ userId: speakerUserId }).lean();
       const cloningEnabled = !!user?.voiceCloningEnabled;
 
-      // Only use a voiceId that is explicitly stored for THIS user (their clone).
-      // Do NOT fall through to ELEVENLABS_DEFAULT_VOICE_ID here — if the user has
-      // cloning enabled but hasn't finished the clone yet, use Google TTS instead.
-      // Using the default voice would make the user think cloning is "working"
-      // when it's actually serving a generic ElevenLabs voice.
       const clonedDbVoiceId =
         user && typeof user.voiceId === 'string' && user.voiceId.length > 0
           ? user.voiceId
@@ -146,18 +131,11 @@ export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId
           );
         }
       } else if (cloningEnabled && !clonedDbVoiceId) {
-        // Cloning is enabled but clone is not ready yet — use Google TTS
-        // (NOT the default ElevenLabs voice, which would look identical to a working clone)
         console.log(
           `[TTS Router] ⏳ CLONE PENDING — speaker=${speakerUserId} using Google TTS until clone ready`,
         );
         return synthesizeSpeech(text, locale);
       } else if (!cloningEnabled) {
-        // Cloning toggle OFF → always use Google TTS.
-        // Do NOT route through ELEVENLABS_DEFAULT_VOICE_ID here: that would
-        // synthesize in a random ElevenLabs voice with no relation to the
-        // actual speaker, which is misleading and indistinguishable from a
-        // "working" clone. Google TTS is the honest fallback when OFF.
         console.log(`[TTS Router] 🔤 CLONING OFF — speaker=${speakerUserId} → Google TTS`);
         return synthesizeSpeech(text, locale);
       }
@@ -169,7 +147,6 @@ export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId
     }
   }
 
-  // ── Path C: Google TTS fallback ────────────────────────────────────────────
   console.log(`[TTS Router] 🔤 GOOGLE TTS — speaker=${speakerUserId ?? 'unknown'} locale=${locale}`);
   return synthesizeSpeech(text, locale);
 }
