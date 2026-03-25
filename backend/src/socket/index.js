@@ -34,6 +34,7 @@ import {
   getClonedVoiceId,
   performVoiceClone,
   clearCloneBuffer,
+  resetCloneBufferForRetry,
   markUserCallActive,
   markUserCallEnded,
 } from '../services/voiceCloning.js';
@@ -490,10 +491,27 @@ export function initSocket(httpServer) {
               // Suppress "already in progress" — a concurrent call will emit clone-ready.
               // Only surface real failures to the client.
               if (err.message.includes('already in progress')) return;
+
+              // NOTE: "Using original voice" is accurate — when clone fails, Path A
+              // continues to send audio-passthrough so the receiver keeps hearing
+              // the speaker's real voice.  We do NOT fall back to generic TTS here.
               socket.emit('clone-failed', {
                 status:  'failed',
-                message: `Voice cloning failed: ${err.message}. Using default TTS voice.`,
+                message: `Voice cloning failed: ${err.message}. Using original voice as fallback.`,
               });
+
+              // Auto-retry: reset the clone buffer after 20 s and collect a fresh
+              // audio window.  Only retry if the socket is still in a room.
+              setTimeout(() => {
+                const stillInRoom = getRoomForSocket(socket.id);
+                if (stillInRoom && resetCloneBufferForRetry(socket.id)) {
+                  console.log(`[VoiceClone] Auto-retry scheduled for socket=${socket.id}`);
+                  socket.emit('clone-started', {
+                    status:  'buffering',
+                    message: 'Retrying voice cloning…',
+                  });
+                }
+              }, 20_000);
             });
         }
       }
@@ -508,30 +526,41 @@ export function initSocket(httpServer) {
       // ══════════════════════════════════════════════════════════════════════
 
       if (senderCloningEnabled) {
-        // ── Path A: CLONING ON — forward original audio immediately ────────
-        // The receiver hears the sender's real voice with zero processing delay.
-        // We still run STT+translate in the background to produce text captions.
-        console.log(`[Passthrough] ${socket.data.userId} → ${receiver.userId} (${speakLang}→${hearLang}) cloningON`);
-        io.to(receiver.socketId).emit('audio-passthrough', { audioBase64, mimeType });
+        const cloneVoiceId = getClonedVoiceId(socket.id);
 
-        // ── Caption pipeline: async, non-blocking ─────────────────────────
-        // Skip if an STT call is already in-flight for this user.
-        if (!sttInFlight.get(socket.id)) {
-          sttInFlight.set(socket.id, true);
-          (async () => {
-            try {
-              const text = await transcribeAudio(audioBase64, sttLocale, mimeType);
-              if (!text.trim()) return;
-              socket.emit('speech-transcript', { text });
-              bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, true);
-            } catch (err) {
-              console.error('[Caption STT Error]', err.message);
-            } finally {
-              sttInFlight.delete(socket.id);
-            }
-          })();
+        if (!cloneVoiceId) {
+          // ── Path A-1: Clone NOT ready yet (buffering / cloning / failed) ─
+          // Forward the original audio immediately so the receiver hears the
+          // speaker's real voice with zero added latency while the clone is
+          // being prepared.  Text captions are produced asynchronously.
+          console.log(`[Passthrough] ${socket.data.userId} → ${receiver.userId} (${speakLang}→${hearLang}) clone-pending`);
+          io.to(receiver.socketId).emit('audio-passthrough', { audioBase64, mimeType });
+
+          // Caption pipeline: async, non-blocking
+          if (!sttInFlight.get(socket.id)) {
+            sttInFlight.set(socket.id, true);
+            (async () => {
+              try {
+                const text = await transcribeAudio(audioBase64, sttLocale, mimeType);
+                if (!text.trim()) return;
+                socket.emit('speech-transcript', { text });
+                bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, true);
+              } catch (err) {
+                console.error('[Caption STT Error]', err.message);
+              } finally {
+                sttInFlight.delete(socket.id);
+              }
+            })();
+          }
+          return;
         }
-        return;
+
+        // ── Path A-2: Clone IS ready — fall through to STT→translate→TTS ──
+        // The cloned voiceId will be picked up by getClonedVoiceId() inside
+        // bufferAndTranslate, so TTS synthesis uses the speaker's cloned voice.
+        // This gives the receiver translated speech that sounds like the speaker.
+        console.log(`[ClonedTTS] ${socket.data.userId} → ${receiver.userId} (${speakLang}→${hearLang}) voice=${cloneVoiceId}`);
+        // intentional fall-through to Path B below
       }
 
       // ── Path B: CLONING OFF — STT → translate → TTS ────────────────────

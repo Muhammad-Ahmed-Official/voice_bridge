@@ -133,21 +133,25 @@ export async function performVoiceClone(socketId) {
     await deleteOldClonedVoice(state.userId);
 
     // ── Build multipart form ──────────────────────────────────────────────────
-    // ElevenLabs /v1/voices/add accepts multiple files; send each segment separately
-    // so we never need to re-encode/concatenate WebM frames.
-    const ext      = state.mimeType.includes('m4a') ? 'm4a' : 'webm';
+    // IMPORTANT: WebM/Opus is a streaming container. Individual VAD segments are
+    // NOT self-contained audio files — only the very first chunk carries the EBML
+    // header, codec parameters, and track metadata that ElevenLabs needs to decode
+    // the audio. Sending chunks as separate files gives ElevenLabs N−1 malformed
+    // blobs and causes cloning to fail or produce a garbage voice.
+    // Fix: concatenate ALL chunks into a single blob before uploading.
+    const ext        = state.mimeType.includes('m4a') ? 'm4a' : 'webm';
+    const totalBytes = state.chunks.reduce((a, b) => a + b.length, 0);
+    const combined   = Buffer.concat(state.chunks);
+    const blob       = new Blob([combined], { type: state.mimeType });
+
     const formData = new FormData();
     formData.append('name',        `vc_${state.userId}_${Date.now()}`);
     formData.append('description', `Auto-cloned for ${state.userId}`);
-
-    state.chunks.forEach((buf, i) => {
-      const blob = new Blob([buf], { type: state.mimeType });
-      formData.append('files', blob, `sample_${i}.${ext}`);
-    });
+    formData.append('files', blob, `voice_sample.${ext}`);
 
     console.log(
-      `[VoiceClone] Uploading ${state.chunks.length} chunk(s) ` +
-      `(~${(state.chunks.reduce((a, b) => a + b.length, 0) / 1024).toFixed(1)} KB) ` +
+      `[VoiceClone] Uploading 1 concatenated file ` +
+      `(${state.chunks.length} segments, ~${(totalBytes / 1024).toFixed(1)} KB) ` +
       `for user=${state.userId}`,
     );
 
@@ -187,6 +191,25 @@ export async function performVoiceClone(socketId) {
     console.error(`[VoiceClone] Failed for user=${state.userId}:`, err.message);
     throw err;
   }
+}
+
+/**
+ * Reset a failed (or ready) clone buffer so a fresh collection window starts.
+ * Call this to schedule an automatic retry after a transient clone failure.
+ * Returns true if the buffer existed and was reset, false otherwise.
+ */
+export function resetCloneBufferForRetry(socketId) {
+  const state = cloneBuffers.get(socketId);
+  if (!state) return false;
+
+  state.chunks        = [];
+  state.startTime     = null;
+  state.status        = 'buffering';
+  state.cloneTriggered = false;
+  state.voiceId       = null;
+
+  console.log(`[VoiceClone] Buffer reset for retry — user=${state.userId} socket=${socketId}`);
+  return true;
 }
 
 /**

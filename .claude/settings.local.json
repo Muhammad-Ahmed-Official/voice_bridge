@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find D:/Client/FYPS/voice_bridge/frontend -name *.tsx ! -path */node_modules/*)"
+    ]
+  }
+}

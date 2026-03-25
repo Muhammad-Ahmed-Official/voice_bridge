@@ -731,7 +731,7 @@ export default function App() {
               {cloneStatus === 'buffering' ? '● SAMPLING VOICE…'
                 : cloneStatus === 'cloning' ? '⟳ CLONING VOICE…'
                 : cloneStatus === 'ready'   ? '✓ AI CLONE ACTIVE'
-                : cloneStatus === 'failed'  ? '⚠ CLONE FAILED — DEFAULT TTS'
+                : cloneStatus === 'failed'  ? '⚠ CLONE FAILED — USING ORIGINAL VOICE'
                 : 'AI CLONE ACTIVE'}
             </Text>
           )}
