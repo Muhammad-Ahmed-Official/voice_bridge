@@ -465,6 +465,20 @@ export function initSocket(httpServer) {
         }
       }
 
+      // ── Resolve language routing (needed before same-language check) ─────────
+      const { sttLocale, ttsLocale, speakLang, hearLang, receiver } =
+        resolveLanguages(room, socket.id);
+
+      // ── Same-language passthrough: skip STT/translate/TTS entirely ────────
+      // When speaker and receiver share the same language the receiver must hear
+      // the sender's ORIGINAL voice in real time. Cloning is irrelevant here —
+      // we never synthesise a new voice; we just forward the raw audio bytes.
+      if (speakLang === hearLang) {
+        console.log(`[Passthrough] ${socket.data.userId} → ${receiver.userId} (${speakLang}=${hearLang}) — forwarding original audio`);
+        io.to(receiver.socketId).emit('audio-passthrough', { audioBase64, mimeType });
+        return;
+      }
+
       // ── Gate 1: STT deduplication ─────────────────────────────────────────
       // Drop the incoming chunk if we are still waiting for a previous STT
       // result from this same user. This prevents the pipeline from stacking up
@@ -481,10 +495,6 @@ export function initSocket(httpServer) {
         console.log(`[STT] Skipping chunk for ${socket.data.userId} — receiver is playing TTS`);
         return;
       }
-
-      // ── Resolve language routing ──────────────────────────────────────────
-      const { sttLocale, ttsLocale, speakLang, hearLang, receiver } =
-        resolveLanguages(room, socket.id);
 
       sttInFlight.set(socket.id, true);
       try {

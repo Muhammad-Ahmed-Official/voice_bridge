@@ -587,12 +587,23 @@ export default function App() {
     };
     socket.on('meeting-speech-transcript', onMeetingSpeechTranscript);
 
+    // ── Same-language passthrough: play the sender's original voice directly ──
+    // No mic gating here — this is full-duplex; the receiver's own audio-chunk
+    // pipeline is independent of hearing the sender's raw voice.
+    const onAudioPassthrough = ({ audioBase64 }: { audioBase64: string }) => {
+      if (isSpeakerRef.current && audioBase64) {
+        playAudio(audioBase64);
+      }
+    };
+    socket.on('audio-passthrough', onAudioPassthrough);
+
     return () => {
       socket.off('tts-start', onTtsStart);
       socket.off('translated-text', onTranslatedText);
       socket.off('speech-transcript', onSpeechTranscript);
       socket.off('meeting-translated', onMeetingTranslated);
       socket.off('meeting-speech-transcript', onMeetingSpeechTranscript);
+      socket.off('audio-passthrough', onAudioPassthrough);
     };
   }, [socket, setTtsPlaying]); // setTtsPlaying is stable (useCallback); refs keep other values fresh
 
