@@ -41,7 +41,8 @@ import {
 } from '../services/voiceCloning.js';
 import { User } from '../models/user.models.js';
 
-const LOCALE_MAP = { UR: 'ur-PK', EN: 'en-US', AR: 'ar-SA' };
+const LOCALE_MAP  = { UR: 'ur-PK', EN: 'en-US', AR: 'ar-SA' };
+const VALID_LANGS = new Set(['UR', 'EN', 'AR']);
 
 // ── Pipeline state maps ───────────────────────────────────────────────────────
 
@@ -122,7 +123,28 @@ function resolveAudioStrategy(room, senderSocketId) {
     strategy = 'passthrough';
   }
 
-  return { strategy, cloneVoiceId, receiver, sender, speakLang, hearLang, sttLocale, ttsLocale };
+  // ── Pipeline invariant assertions (dev only) ─────────────────────────────
+  // These catch any future refactor that accidentally breaks sender/receiver separation.
+  if (process.env.NODE_ENV !== 'production') {
+    if (sttLocale !== (LOCALE_MAP[speakLang] ?? 'en-US')) {
+      console.error(`[INVARIANT] sttLocale="${sttLocale}" !== LOCALE_MAP[sender.speakLang="${speakLang}"]`);
+    }
+    if (ttsLocale !== (LOCALE_MAP[hearLang] ?? 'en-US')) {
+      console.error(`[INVARIANT] ttsLocale="${ttsLocale}" !== LOCALE_MAP[receiver.hearLang="${hearLang}"]`);
+    }
+    if (speakLang === sender.hearLang && sender.hearLang !== receiver.hearLang) {
+      console.warn(`[SUSPECT] speakLang="${speakLang}" matches sender.hearLang — check field ownership`);
+    }
+  }
+
+  // ── Route log: shows all four key values in one line ─────────────────────
+  console.log(
+    `[Route] ${sender.userId}(speaks=${speakLang}) → ${receiver.userId}(hears=${hearLang})` +
+    ` | stt=${sttLocale} tts=${ttsLocale} | strategy=${strategy}` +
+    (cloneVoiceId ? ` | clone=${cloneVoiceId.slice(0, 8)}…` : ''),
+  );
+
+  return { strategy, cloneVoiceId, receiver, sender, speakLang, hearLang, sttLocale, ttsLocale, senderCloningEnabled };
 }
 
 /**
@@ -139,7 +161,7 @@ function resolveAudioStrategy(room, senderSocketId) {
  *   4. Delivers audio + text to receiver
  *   5. Receiver will ACK tts-end after playback → resumes its mic
  */
-function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, captionOnly = false) {
+function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, captionOnly = false, senderCloningEnabled = false) {
   const key = `${roomId}_${socket.id}`;
   const buffer = textBuffers.get(key) || { text: '', timeout: null };
 
@@ -192,10 +214,11 @@ function bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, recei
       const freshCloneVoiceId = getClonedVoiceId(socket.id);
 
       const ttsAudio = await getTtsForUser({
-        text:          result.text,
-        locale:        ttsLocale,           // ← receiver's hearLang locale
-        speakerUserId: socket.data.userId,
-        clonedVoiceId: freshCloneVoiceId,   // ← always fresh at flush time
+        text:              result.text,
+        locale:            ttsLocale,            // ← receiver's hearLang locale
+        speakerUserId:     socket.data.userId,
+        clonedVoiceId:     freshCloneVoiceId,    // ← always fresh at flush time
+        cloningEnabled:    senderCloningEnabled, // ← skips DB lookup when cloning is off
       }).catch((err) => {
         console.warn('[Pipeline] TTS failed, delivering text-only to receiver:', err.message);
         return null;
@@ -308,6 +331,15 @@ export function initSocket(httpServer) {
         socket.emit('call-error', { message: 'You cannot call yourself.' });
         return;
       }
+      // Validate language codes before storing — an empty string or unknown
+      // code would silently corrupt every downstream language-routing decision.
+      if (!VALID_LANGS.has(speakLang) || !VALID_LANGS.has(hearLang)) {
+        socket.emit('call-error', {
+          message: `Invalid language configuration (speakLang=${speakLang}, hearLang=${hearLang}). Expected: UR | EN | AR`,
+        });
+        console.warn(`[call-user] Rejected invalid langs from ${socket.data.userId}: speak=${speakLang} hear=${hearLang}`);
+        return;
+      }
       const targetSocketId = getSocketIdForUser(targetUserId);
       if (!targetSocketId) {
         socket.emit('call-error', { message: `User "${targetUserId}" is not online.` });
@@ -315,7 +347,7 @@ export function initSocket(httpServer) {
       }
       // Persist caller's lang prefs so accept-call can read them
       socket.data.speakLang = speakLang;
-      socket.data.hearLang = hearLang;
+      socket.data.hearLang  = hearLang;
 
       io.to(targetSocketId).emit('incoming-call', {
         callerId: socket.data.userId,
@@ -334,14 +366,29 @@ export function initSocket(httpServer) {
       const callerSocket = io.sockets.sockets.get(callerSocketId);
       const roomId = `${callerId}_${socket.data.userId}_${Date.now()}`;
 
+      // Validate caller's stored language prefs (set during call-user).
+      // If they are missing or invalid, reject instead of silently using wrong defaults.
+      const rawSpeakA = callerSocket?.data.speakLang;
+      const rawHearA  = callerSocket?.data.hearLang;
+      if (!VALID_LANGS.has(rawSpeakA) || !VALID_LANGS.has(rawHearA)) {
+        socket.emit('call-error', {
+          message: 'Caller language configuration is missing or invalid. Please retry the call.',
+        });
+        console.error(
+          `[accept-call] REJECTED room — caller ${callerId} has invalid langs: ` +
+          `speakLang=${rawSpeakA} hearLang=${rawHearA}`,
+        );
+        return;
+      }
+
       // voiceCloningEnabled defaults to false; updated below after DB fetch.
       // Stored on the room object so audio-chunk can read it without a DB call per chunk.
       const userA = {
-        socketId: callerSocketId,
-        odId: callerSocket?.data.odId || null,
-        userId: callerId,
-        speakLang: callerSocket?.data.speakLang || 'EN',
-        hearLang: callerSocket?.data.hearLang || 'UR',
+        socketId:            callerSocketId,
+        odId:                callerSocket?.data.odId || null,
+        userId:              callerId,
+        speakLang:           rawSpeakA,   // validated — no silent fallback
+        hearLang:            rawHearA,    // validated — no silent fallback
         voiceCloningEnabled: false,
       };
       const userB = {
@@ -437,7 +484,7 @@ export function initSocket(httpServer) {
 
     // ── speech-text → translate → TTS → peer ─────────────────────────────────
     // Used when the client sends text directly (typed input fallback).
-    // Language routing: same resolveLanguages() rules apply.
+    // Language routing: same resolveAudioStrategy() rules apply.
     socket.on('speech-text', async ({ roomId, text }) => {
       const room = getRoom(roomId);
       if (!room) return;
@@ -461,7 +508,7 @@ export function initSocket(httpServer) {
           text:          result.text,
           locale:        ttsLocale,
           speakerUserId: socket.data.userId,
-          clonedVoiceId: cloneVoiceId ?? getClonedVoiceId(socket.id),
+          clonedVoiceId: cloneVoiceId,
         }).catch(() => null);
 
         if (ttsAudio) {
@@ -490,7 +537,7 @@ export function initSocket(httpServer) {
     //      socket, skip — the VAD recorder already sends one segment per utterance
     //      but network retries or overlapping segments would cause duplicates.
     //   4. Run Google STT with the SPEAKER's language (speakLang)
-    //   5. Buffer and translate using resolveLanguages() — STT lang ≠ TTS lang
+    //   5. Buffer and translate using resolveAudioStrategy() — STT lang ≠ TTS lang
     //   6. TTS uses the RECEIVER's hearLang (enforced in bufferAndTranslate)
     socket.on('audio-chunk', async ({ roomId, audioBase64, mimeType }) => {
       if (!roomId) { console.warn('[STT] audio-chunk missing roomId from', socket.data.userId); return; }
@@ -500,7 +547,7 @@ export function initSocket(httpServer) {
       if (!room) { console.warn('[STT] room not found:', roomId, '— user:', socket.data.userId); return; }
 
       // ── Resolve strategy FIRST so we know if cloning is even active ───────
-      const { strategy, cloneVoiceId, receiver, speakLang, hearLang, sttLocale, ttsLocale } =
+      const { strategy, cloneVoiceId, receiver, speakLang, hearLang, sttLocale, ttsLocale, senderCloningEnabled } =
         resolveAudioStrategy(room, socket.id);
 
       // ── Voice Cloning: buffer audio for pending clone (runs BEFORE STT) ──
@@ -568,7 +615,7 @@ export function initSocket(httpServer) {
               const text = await transcribeAudio(audioBase64, sttLocale, mimeType);
               if (!text.trim()) return;
               socket.emit('speech-transcript', { text });
-              bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, true);
+              bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, true, senderCloningEnabled);
             } catch (err) {
               console.warn('[Caption STT Error]', err.message);
             } finally {
@@ -583,6 +630,22 @@ export function initSocket(httpServer) {
       // Strategy: tts | cloned-tts — STT → translate → TTS synthesis
       // ══════════════════════════════════════════════════════════════════════
 
+      // Gate 0: same-language shortcut — no translation needed.
+      // The receiver already understands this language, but since there is no
+      // WebRTC direct audio they still need to hear via passthrough.
+      if (speakLang === hearLang) {
+        io.to(receiver.socketId).emit('audio-passthrough', { audioBase64, mimeType });
+        // Still transcribe so sender sees their own words on their tile.
+        if (!sttInFlight.get(socket.id)) {
+          sttInFlight.set(socket.id, true);
+          transcribeAudio(audioBase64, sttLocale, mimeType)
+            .then(text => { if (text?.trim()) socket.emit('speech-transcript', { text }); })
+            .catch(() => {})
+            .finally(() => sttInFlight.delete(socket.id));
+        }
+        return;
+      }
+
       // Gate 1: drop chunk if a previous STT call is still in-flight
       if (sttInFlight.get(socket.id)) return;
       // Gate 2: drop chunk while receiver is playing TTS (prevents echo)
@@ -595,7 +658,7 @@ export function initSocket(httpServer) {
 
         console.log(`[STT] ${socket.data.userId}: "${text}" (${speakLang}→${hearLang}) [${strategy}]`);
         socket.emit('speech-transcript', { text });
-        bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, false);
+        bufferAndTranslate(io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, false, senderCloningEnabled);
 
       } catch (err) {
         console.warn('[STT Error]', err.message);

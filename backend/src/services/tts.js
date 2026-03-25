@@ -1,9 +1,8 @@
 import googleTTS from 'google-tts-api';
 import { User } from '../models/user.models.js';
-import {
-  ELEVENLABS_DEFAULT_VOICE_ID,
-} from '../config/elevenlabs.config.js';
 import { synthesizeWithElevenLabs } from './elevenlabsTts.js';
+// Note: ELEVENLABS_DEFAULT_VOICE_ID intentionally NOT imported — generic default
+// voices are never used here. If cloning is off or fails, Google TTS is the fallback.
 
 // Maps our internal locale codes to google-tts-api language codes
 const LANG_MAP = {
@@ -82,8 +81,16 @@ export async function synthesizeSpeech(text, locale) {
  *                                          Bypasses DB lookup and avoids the DB write race.
  * @returns {Promise<string|null>} Base64-encoded MP3 audio.
  */
-export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId }) {
+export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId, cloningEnabled }) {
   if (!text || !text.trim()) return null;
+
+  // ── Fast path: cloning definitively OFF — skip DB lookup entirely ──────────
+  // cloningEnabled=false is passed by the audio pipeline when the room object
+  // already confirms the sender has cloning disabled. No need to re-read DB.
+  if (!clonedVoiceId && cloningEnabled === false) {
+    console.log(`[TTS Router] GOOGLE TTS (fast) — speaker=${speakerUserId} locale=${locale}`);
+    return synthesizeSpeech(text, locale);
+  }
 
   // ── Path A: In-memory cloned voice_id provided (fastest, no DB round-trip) ─
   // This is set by the socket handler once performVoiceClone() succeeds.
