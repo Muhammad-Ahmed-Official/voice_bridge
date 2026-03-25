@@ -537,9 +537,11 @@ export default function App() {
     };
     socket.on('tts-start', onTtsStart);
 
-    const onTranslatedText = ({ text, audioBase64 }: { text: string; audioBase64?: string }) => {
-      console.log('[pipeline] translated-text received:', text, 'isSpeaker:', isSpeakerRef.current);
-      if (isSpeakerRef.current) {
+    const onTranslatedText = ({ text, audioBase64, captionOnly }: { text: string; audioBase64?: string; captionOnly?: boolean }) => {
+      console.log('[pipeline] translated-text received:', text, 'captionOnly:', captionOnly, 'isSpeaker:', isSpeakerRef.current);
+      if (isSpeakerRef.current && !captionOnly) {
+        // captionOnly=true means cloning is ON and the real voice is already
+        // playing via audio-passthrough. Do NOT play TTS or browser speech here.
         if (audioBase64) {
           playAudio(
             audioBase64,

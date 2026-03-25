@@ -16,6 +16,19 @@ import { User } from '../models/user.models.js';
 // val: { chunks: Buffer[], mimeType, startTime, userId, status, voiceId }
 const cloneBuffers = new Map();
 
+// Tracks which userIds currently have an active call.
+// deleteOldClonedVoice skips deletion when the user is in a call to prevent
+// 404 errors if a TTS request is in-flight using the about-to-be-deleted voice_id.
+const activeCallUsers = new Set();
+
+export function markUserCallActive(userId) {
+  activeCallUsers.add(userId);
+}
+
+export function markUserCallEnded(userId) {
+  activeCallUsers.delete(userId);
+}
+
 // ElevenLabs IVC recommends ≥30 s of speech. We use 20 s wall-clock which
 // typically yields 12-16 s of voiced audio after VAD silence removal.
 // This is a notable improvement over 10 s without making the first clone wait too long.
@@ -195,6 +208,14 @@ export function clearCloneBuffer(socketId) {
  */
 async function deleteOldClonedVoice(userId) {
   if (!ELEVENLABS_API_KEY) return;
+
+  // Do not delete the voice while the user is in an active call.
+  // A TTS request for the old voice_id may be in-flight; deleting it now
+  // would cause a 404 from ElevenLabs and break audio for the receiver.
+  if (activeCallUsers.has(userId)) {
+    console.log(`[VoiceClone] Skipping voice deletion for ${userId} — active call in progress`);
+    return;
+  }
 
   try {
     const user = await User.findOne({ userId }).lean();
