@@ -89,6 +89,21 @@ type OnChunk = (audioBase64: string, mimeType: string) => void;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(resolve, ms);
+    if (!signal) return;
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(id);
+        reject(new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
+  });
+}
+
 function pickMimeType(): string {
   if (typeof MediaRecorder === 'undefined') return '';
   const candidates = [
@@ -153,11 +168,23 @@ export function useVADAudioRecorder() {
 
   // ── Native ────────────────────────────────────────────────────────────────
   const nativeRecorder = useExpoAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const nativeCycleBusyRef = useRef(false);
+  const nativeAbortRef = useRef<AbortController | null>(null);
 
   // ── TTS gate ──────────────────────────────────────────────────────────────
-  const setTtsPlaying = useCallback((playing: boolean) => {
+  const setTtsPlaying = useCallback((playing: boolean): void | Promise<void> => {
     isTtsPlayingRef.current = playing;
     if (playing) endSpeechSegment('tts-started');
+    if (playing && Platform.OS !== 'web') {
+      nativeAbortRef.current?.abort();
+      return (async () => {
+        const deadline = Date.now() + 5_000;
+        while (nativeCycleBusyRef.current && Date.now() < deadline) {
+          await new Promise<void>((r) => setTimeout(r, 25));
+        }
+      })();
+    }
+    return undefined;
   }, []);
 
   // ── Segment helpers ───────────────────────────────────────────────────────
@@ -596,53 +623,80 @@ export function useVADAudioRecorder() {
       activeRef.current  = true;
       onChunkRef.current = onChunk;
       console.log('[VAD] Native recording started');
-      runNativeCycle();
+      void runNativeCycle();
     } catch (err: any) {
       console.error('[VAD] Native start error:', err);
       onDenied?.();
     }
   }
 
-  async function runNativeCycle() {
+  async function runNativeCycle(): Promise<void> {
     if (!activeRef.current) return;
-    if (isTtsPlayingRef.current) { setTimeout(runNativeCycle, 200); return; }
+    if (isTtsPlayingRef.current) {
+      setTimeout(() => void runNativeCycle(), 200);
+      return;
+    }
+    if (nativeCycleBusyRef.current) return;
+
+    nativeCycleBusyRef.current = true;
+    const ac = new AbortController();
+    nativeAbortRef.current = ac;
+    let retryDelayMs = 0;
 
     try {
       await nativeRecorder.prepareToRecordAsync();
-      nativeRecorder.record(); // synchronous in expo-audio
+      nativeRecorder.record();
       console.log('[VAD] Native: recording chunk…');
 
-      setTimeout(async () => {
-        if (!activeRef.current) return;
+      await wait(NATIVE_CYCLE_MS, ac.signal);
+
+      if (!activeRef.current) {
         try {
           await nativeRecorder.stop();
-          const uri = nativeRecorder.uri; // string | null in expo-audio AudioRecorder
-          console.log(`[VAD] Native: stopped, uri=${uri}`);
-
-          if (!isTtsPlayingRef.current && uri) {
-            const base64 = await FileSystemLegacy.readAsStringAsync(uri, {
-              encoding: FileSystemLegacy.EncodingType.Base64,
-            });
-            if (base64 && onChunkRef.current && activeRef.current) {
-              lastChunkTimeRef.current = Date.now();
-              console.log(`[VAD] Native ✓ Sending chunk: ${base64.length} chars`);
-              onChunkRef.current(base64, 'audio/m4a');
-            }
-            await FileSystemLegacy.deleteAsync(uri, { idempotent: true }).catch(() => {});
-          } else if (!uri) {
-            console.warn('[VAD] Native: uri was null after stop()');
-          }
-
-          runNativeCycle();
-        } catch (innerErr) {
-          console.error('[VAD] Native inner error:', innerErr);
-          if (activeRef.current) setTimeout(runNativeCycle, 500);
+        } catch {
+          /* not recording */
         }
-      }, NATIVE_CYCLE_MS);
+        return;
+      }
 
-    } catch (outerErr) {
-      console.error('[VAD] Native prepareToRecordAsync error:', outerErr);
-      if (activeRef.current) setTimeout(runNativeCycle, 1_000);
+      await nativeRecorder.stop();
+      const uri = nativeRecorder.uri;
+      console.log(`[VAD] Native: stopped, uri=${uri}`);
+
+      if (!isTtsPlayingRef.current && uri) {
+        const base64 = await FileSystemLegacy.readAsStringAsync(uri, {
+          encoding: FileSystemLegacy.EncodingType.Base64,
+        });
+        if (base64 && onChunkRef.current && activeRef.current) {
+          lastChunkTimeRef.current = Date.now();
+          console.log(`[VAD] Native ✓ Sending chunk: ${base64.length} chars`);
+          onChunkRef.current(base64, 'audio/m4a');
+        }
+        await FileSystemLegacy.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      } else if (!uri) {
+        console.warn('[VAD] Native: uri was null after stop()');
+      } else if (uri && isTtsPlayingRef.current) {
+        await FileSystemLegacy.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      }
+    } catch (outerErr: any) {
+      if (outerErr?.name === 'AbortError') {
+        try {
+          await nativeRecorder.stop();
+        } catch {
+          /* not recording */
+        }
+        const uri = nativeRecorder.uri;
+        if (uri) await FileSystemLegacy.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      } else {
+        console.error('[VAD] Native cycle error:', outerErr);
+        retryDelayMs = 1_000;
+      }
+    } finally {
+      nativeAbortRef.current = null;
+      nativeCycleBusyRef.current = false;
+      if (!activeRef.current) return;
+      const delay = isTtsPlayingRef.current ? 200 : retryDelayMs;
+      setTimeout(() => void runNativeCycle(), delay);
     }
   }
 
@@ -659,10 +713,11 @@ export function useVADAudioRecorder() {
 
   const stopRecording = useCallback(() => {
     activeRef.current = false;
+    nativeAbortRef.current?.abort();
     if (Platform.OS === 'web') {
       stopWebRecording();
     } else {
-      nativeRecorder.stop().catch(() => {});
+      void nativeRecorder.stop().catch(() => {});
     }
   }, []);
 

@@ -15,7 +15,7 @@ import { useSocket } from '@/hooks/useSocket';
 import { useSpeechRecognition, isWebSpeechSupported } from '@/hooks/useSpeechRecognition';
 import { useVADAudioRecorder } from '@/hooks/useVADAudioRecorder';
 import { useBluetooth } from '@/hooks/useBluetooth';
-import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { historyApi } from '@/api/history';
 import { updatePreferences } from '@/api/user';
 import { useRouter } from 'expo-router';
@@ -55,72 +55,6 @@ function speakText(text: string, locale: string) {
   window.speechSynthesis.speak(utterance);
 }
 
-// Play base64 MP3 audio from Google Cloud TTS
-// Web: native HTMLAudioElement; Native: expo-audio player
-// onStart: called just before playback begins (use to mute mic)
-// onEnd:   called when playback finishes or errors (use to unmute mic)
-async function playAudio(
-  audioBase64: string,
-  onStart?: () => void,
-  onEnd?: () => void,
-) {
-  if (!audioBase64) return;
-  console.log('[TTS] playAudio called, bytes:', audioBase64.length);
-
-  if (Platform.OS === 'web') {
-    if (typeof window === 'undefined') return;
-    try {
-      const audio = new window.Audio('data:audio/mp3;base64,' + audioBase64);
-      audio.addEventListener('ended', () => onEnd?.(), { once: true });
-      audio.addEventListener('error', () => onEnd?.(), { once: true });
-      onStart?.();
-      await audio.play();
-    } catch (e: any) {
-      console.error('[TTS] web audio play error:', e);
-      onEnd?.();
-    }
-  } else {
-    try {
-      // FIX #6: removed invalid `shouldDuckAndroid` (not a valid AudioMode field
-      // in expo-audio; was silently ignored but is cleaner without it)
-      await setAudioModeAsync({
-        playsInSilentMode: true,
-        allowsRecording: true,
-        interruptionMode: 'doNotMix',
-      });
-
-      const player = createAudioPlayer({
-        uri: 'data:audio/mp3;base64,' + audioBase64,
-      });
-
-      onStart?.();
-      player.play();
-
-      // Detect playback completion via status updates; fall back to a long timeout
-      let ended = false;
-      const markEnded = () => {
-        if (ended) return;
-        ended = true;
-        onEnd?.();
-        try { player.remove?.(); } catch {}
-      };
-
-      // expo-audio AudioPlayer emits 'playbackStatusUpdate' with { didJustFinish }
-      const sub = player.addListener('playbackStatusUpdate', (status) => {
-        if (status?.didJustFinish) {
-          sub.remove();
-          markEnded();
-        }
-      });
-
-      // Safety net: release after 60 s regardless
-      setTimeout(markEnded, 60_000);
-    } catch (e) {
-      console.error('[TTS] native audio play error:', e);
-      onEnd?.();
-    }
-  }
-}
 
 function showAlert(title: string, message: string, onOk?: () => void) {
   if (Platform.OS === 'web') {
@@ -233,6 +167,7 @@ export default function App() {
   const { socket } = useSocket(user?.userId ?? null, user?._id ?? null);
   const { startListening, stopListening } = useSpeechRecognition();
   const { startRecording, stopRecording, setTtsPlaying, warmUpAudio } = useVADAudioRecorder();
+  const { playAudio, stopAudio } = useAudioPlayer();
   const { devices: btDevices, isScanning: btScanning, scanError: btScanError, startScan: btStartScan, stopScan: btStopScan, isBleSupported } = useBluetooth();
 
   // Track which STT mode is being used: 'browser' | 'audio-recorder' | null
@@ -352,9 +287,10 @@ export default function App() {
     };
 
     const onCallEnded = ({ roomId: endedRoomId }: { roomId?: string } = {}) => {
-      // Stop recording immediately to prevent sending audio to deleted room
+      // Stop recording and any in-flight TTS audio immediately
       stopRecording();
       stopListening();
+      stopAudio();
 
       // History is saved by the user who initiates end-call, not here
       setCallStartTime(null);
@@ -372,7 +308,7 @@ export default function App() {
     };
 
     const onPeerDisconnected = () => {
-      // History is saved by the user who initiates end-call
+      stopAudio();
       setCallStartTime(null);
       setRoomId(null);
       setCallState('idle');
@@ -480,6 +416,7 @@ export default function App() {
     // chunks and see endless "room not found" errors.
     const onReconnect = () => {
       if (roomIdRef.current) {
+        stopAudio();
         setRoomId(null);
         setMeetingId(null);
         setIsMeetingMode(false);
@@ -514,7 +451,7 @@ export default function App() {
       socket.off('clone-ready',   onCloneReady);
       socket.off('clone-failed',  onCloneFailed); // maps to 'using-original' state
     };
-  }, [socket, user, speakLang, hearLang, incomingCall, callInviteSpeakLang, callInviteHearLang, stopRecording, stopListening]);
+  }, [socket, user, speakLang, hearLang, incomingCall, callInviteSpeakLang, callInviteHearLang, stopRecording, stopListening, stopAudio]);
 
   // ── Discoverable mode: emit start/stop based on screen ───────────────────
   useEffect(() => {
@@ -615,7 +552,7 @@ export default function App() {
       socket.off('meeting-speech-transcript', onMeetingSpeechTranscript);
       socket.off('audio-passthrough', onAudioPassthrough);
     };
-  }, [socket, setTtsPlaying]); // setTtsPlaying is stable (useCallback); refs keep other values fresh
+  }, [socket, setTtsPlaying, playAudio]); // all three are stable useCallback refs
 
   // ── Hybrid Audio Capture ────────────────────────────────────────────────────
   // For languages supported by Web Speech API (EN, AR): use browser STT
