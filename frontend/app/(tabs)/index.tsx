@@ -221,8 +221,8 @@ export default function App() {
   const [cloningEnabled, setCloningEnabled] = useState(
     !!user?.voiceCloningEnabled,
   );
-  // 'idle' | 'buffering' | 'cloning' | 'ready' | 'failed'
-  const [cloneStatus, setCloneStatus] = useState<'idle' | 'buffering' | 'cloning' | 'ready' | 'failed'>('idle');
+  // 'idle' | 'buffering' | 'cloning' | 'ready' | 'using-original'
+  const [cloneStatus, setCloneStatus] = useState<'idle' | 'buffering' | 'cloning' | 'ready' | 'using-original'>('idle');
   const [participantIds, setParticipantIds] = useState('');
   const [activeConfig, setActiveConfig] = useState<any>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -466,7 +466,9 @@ export default function App() {
     // ── Voice Cloning status events ───────────────────────────────────────────
     const onCloneStarted = () => setCloneStatus('buffering');
     const onCloneReady   = () => setCloneStatus('ready');
-    const onCloneFailed  = () => setCloneStatus('failed');
+    // 'clone-failed' is emitted for both limit-hit and transient errors.
+    // Either way the fallback is passthrough — show "Using original voice" silently.
+    const onCloneFailed  = () => setCloneStatus('using-original');
 
     socket.on('clone-started', onCloneStarted);
     socket.on('clone-ready',   onCloneReady);
@@ -510,7 +512,7 @@ export default function App() {
       socket.off('translation-error', onTranslationError);
       socket.off('clone-started', onCloneStarted);
       socket.off('clone-ready',   onCloneReady);
-      socket.off('clone-failed',  onCloneFailed);
+      socket.off('clone-failed',  onCloneFailed); // maps to 'using-original' state
     };
   }, [socket, user, speakLang, hearLang, incomingCall, callInviteSpeakLang, callInviteHearLang, stopRecording, stopListening]);
 
@@ -723,15 +725,15 @@ export default function App() {
           {cloningEnabled && (
             <Text style={[
               styles.cloningStatusLabel,
-              cloneStatus === 'buffering' && { color: THEME.primary },
-              cloneStatus === 'cloning'   && { color: '#F59E0B' },
-              cloneStatus === 'ready'     && { color: THEME.success },
-              cloneStatus === 'failed'    && { color: THEME.danger },
+              cloneStatus === 'buffering'      && { color: THEME.primary },
+              cloneStatus === 'cloning'        && { color: '#F59E0B' },
+              cloneStatus === 'ready'          && { color: THEME.success },
+              cloneStatus === 'using-original' && { color: THEME.textMuted },
             ]}>
-              {cloneStatus === 'buffering' ? '● SAMPLING VOICE…'
-                : cloneStatus === 'cloning' ? '⟳ CLONING VOICE…'
-                : cloneStatus === 'ready'   ? '✓ AI CLONE ACTIVE'
-                : cloneStatus === 'failed'  ? '⚠ CLONE FAILED — USING ORIGINAL VOICE'
+              {cloneStatus === 'buffering'      ? '● SAMPLING VOICE…'
+                : cloneStatus === 'cloning'     ? '⟳ CLONING VOICE…'
+                : cloneStatus === 'ready'       ? '✓ AI CLONE ACTIVE'
+                : cloneStatus === 'using-original' ? 'Using original voice'
                 : 'AI CLONE ACTIVE'}
             </Text>
           )}
@@ -744,10 +746,10 @@ export default function App() {
             <View style={styles.tileTopRow}>
                <View style={[
                 styles.avatarBox,
-                i === 0 && cloningEnabled && cloneStatus === 'ready'     && { backgroundColor: 'rgba(16, 185, 129, 0.2)' },
-                i === 0 && cloningEnabled && cloneStatus === 'buffering' && { backgroundColor: 'rgba(6, 182, 212, 0.2)' },
-                i === 0 && cloningEnabled && cloneStatus === 'cloning'   && { backgroundColor: 'rgba(245, 158, 11, 0.2)' },
-                i === 0 && cloningEnabled && cloneStatus === 'failed'    && { backgroundColor: 'rgba(244, 63, 94, 0.2)' },
+                i === 0 && cloningEnabled && cloneStatus === 'ready'          && { backgroundColor: 'rgba(16, 185, 129, 0.2)' },
+                i === 0 && cloningEnabled && cloneStatus === 'buffering'       && { backgroundColor: 'rgba(6, 182, 212, 0.2)' },
+                i === 0 && cloningEnabled && cloneStatus === 'cloning'         && { backgroundColor: 'rgba(245, 158, 11, 0.2)' },
+                i === 0 && cloningEnabled && cloneStatus === 'using-original'  && { backgroundColor: 'rgba(148, 163, 184, 0.1)' },
               ]}>
                 {i === 0 && cloningEnabled && cloneStatus === 'ready'
                   ? <Mic size={24} color={THEME.success} />

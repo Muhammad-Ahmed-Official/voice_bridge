@@ -13,13 +13,19 @@ import { User } from '../models/user.models.js';
 
 // ── In-memory state ──────────────────────────────────────────────────────────
 // key: socketId
-// val: { chunks: Buffer[], mimeType, startTime, userId, status, voiceId }
+// val: { chunks: Buffer[], mimeType, startTime, userId, status, voiceId,
+//        cloneTriggered, voiceLimitReached }
 const cloneBuffers = new Map();
 
 // Tracks which userIds currently have an active call.
 // deleteOldClonedVoice skips deletion when the user is in a call to prevent
 // 404 errors if a TTS request is in-flight using the about-to-be-deleted voice_id.
 const activeCallUsers = new Set();
+
+// Session-level set: userIds for which ElevenLabs voice limit has been hit.
+// Once a userId enters this set, NO further clone attempts are made for the
+// lifetime of this server process (the limit is account-wide, not per-call).
+const voiceLimitUsers = new Set();
 
 export function markUserCallActive(userId) {
   activeCallUsers.add(userId);
@@ -45,17 +51,26 @@ export function initCloneBuffer(socketId, userId) {
   // Clear any leftover state (e.g. reconnect)
   cloneBuffers.delete(socketId);
 
+  // If this user already hit the ElevenLabs voice limit, start in 'failed'
+  // so the audio-chunk handler never attempts buffering or cloning again.
+  const limitReached = voiceLimitUsers.has(userId);
+
   cloneBuffers.set(socketId, {
-    chunks:      [],
-    mimeType:    'audio/webm',
-    startTime:   null,   // set on first chunk
+    chunks:           [],
+    mimeType:         'audio/webm',
+    startTime:        null,   // set on first chunk
     userId,
-    status:      'buffering', // 'buffering' | 'cloning' | 'ready' | 'failed'
-    voiceId:     null,
-    cloneTriggered: false,   // guard: prevent duplicate performVoiceClone calls
+    status:           limitReached ? 'failed' : 'buffering',
+    voiceId:          null,
+    cloneTriggered:   false,   // guard: prevent duplicate performVoiceClone calls
+    voiceLimitReached: limitReached,
   });
 
-  console.log(`[VoiceClone] Buffer initialised for user=${userId} socket=${socketId}`);
+  if (limitReached) {
+    console.warn(`[VoiceClone] User=${userId} hit voice limit previously — cloning disabled for this session`);
+  } else {
+    console.log(`[VoiceClone] Buffer initialised for user=${userId} socket=${socketId}`);
+  }
 }
 
 /**
@@ -164,6 +179,11 @@ export async function performVoiceClone(socketId) {
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '(no body)');
+      // Detect account-level voice limit (permanent for this process)
+      if (errText.includes('voice_limit_reached')) {
+        state.voiceLimitReached = true;
+        voiceLimitUsers.add(state.userId);
+      }
       throw new Error(
         `ElevenLabs /v1/voices/add HTTP ${response.status}: ${errText}`,
       );
@@ -188,7 +208,8 @@ export async function performVoiceClone(socketId) {
 
   } catch (err) {
     state.status = 'failed';
-    console.error(`[VoiceClone] Failed for user=${state.userId}:`, err.message);
+    // Use warn (not error) to avoid log spam; the caller decides whether to retry
+    console.warn(`[VoiceClone] Failed for user=${state.userId}:`, err.message);
     throw err;
   }
 }
@@ -202,14 +223,28 @@ export function resetCloneBufferForRetry(socketId) {
   const state = cloneBuffers.get(socketId);
   if (!state) return false;
 
-  state.chunks        = [];
-  state.startTime     = null;
-  state.status        = 'buffering';
+  // Never retry if the account-level voice limit was hit — it won't resolve on retry.
+  if (state.voiceLimitReached) {
+    console.warn(`[VoiceClone] Skipping retry for user=${state.userId} — voice limit is permanent`);
+    return false;
+  }
+
+  state.chunks         = [];
+  state.startTime      = null;
+  state.status         = 'buffering';
   state.cloneTriggered = false;
-  state.voiceId       = null;
+  state.voiceId        = null;
 
   console.log(`[VoiceClone] Buffer reset for retry — user=${state.userId} socket=${socketId}`);
   return true;
+}
+
+/**
+ * Returns true if the ElevenLabs voice limit has been reached for this socket's user.
+ * When true, no further cloning should be attempted.
+ */
+export function isVoiceLimitReached(socketId) {
+  return cloneBuffers.get(socketId)?.voiceLimitReached ?? false;
 }
 
 /**
