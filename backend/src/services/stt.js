@@ -1,8 +1,5 @@
-import ffmpeg from 'fluent-ffmpeg';
+import { spawn } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
-import { Readable } from 'stream';
-
-ffmpeg.setFfmpegPath(ffmpegPath);
 
 const GOOGLE_STT_URL = 'https://speech.googleapis.com/v1/speech:recognize';
 
@@ -41,37 +38,106 @@ const LANGUAGE_MODEL_MAP = {
 // For WEBM_OPUS / OGG_OPUS Google auto-detects the sample rate from the container,
 // so we must NOT include sampleRateHertz in the config.
 
-function bufferToStream(buffer) {
-  const stream = new Readable();
-  stream.push(buffer);
-  stream.push(null);
-  return stream;
+// ── M4A → LINEAR16 WAV conversion ────────────────────────────────────────────
+//
+// WHY spawn() instead of fluent-ffmpeg:
+//
+//   fluent-ffmpeg's .pipe() returns a PassThrough stream with no held reference.
+//   Node.js GC can collect it before data flows through, closing the output pipe
+//   mid-operation and triggering "Output stream closed".
+//
+//   Direct spawn with pipe:0 (stdin) → pipe:1 (stdout) keeps the pipes alive
+//   for the full lifetime of the child process — no intermediate stream objects,
+//   no GC hazard.
+//
+// WHY -f mp4 on the first attempt:
+//
+//   MediaRecorder native chunks ARE complete M4A/MP4 files (moov atom present).
+//   Telling ffmpeg the container format explicitly skips the format-probe step,
+//   which sometimes fails on short recordings or unusual encoder configurations.
+//
+// WHY a retry without -f mp4:
+//
+//   Some devices produce M4A with a slightly non-standard container that ffmpeg's
+//   MP4 demuxer rejects but the auto-prober handles correctly.
+
+/**
+ * Run ffmpeg with the given args, feeding inputBuffer via stdin, returning stdout.
+ * Stderr is fully consumed to prevent the child process from blocking on it.
+ * A 10 s hard timeout kills a hung ffmpeg process.
+ *
+ * @param {Buffer}   inputBuffer
+ * @param {string[]} args
+ * @returns {Promise<Buffer>}
+ */
+function runFfmpeg(inputBuffer, args) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn(ffmpegPath, args);
+    const outChunks = [];
+    const errChunks = [];
+
+    ff.stdout.on('data', (c) => outChunks.push(c));
+    ff.stderr.on('data', (c) => errChunks.push(c)); // must drain — ffmpeg blocks if stderr fills
+
+    const timer = setTimeout(() => {
+      ff.kill('SIGKILL');
+      reject(new Error('ffmpeg timed out after 10 s'));
+    }, 10_000);
+
+    ff.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        const msg = Buffer.concat(errChunks).toString().slice(-300); // last 300 chars of stderr
+        return reject(new Error(`ffmpeg exited ${code}: ${msg}`));
+      }
+      const out = Buffer.concat(outChunks);
+      // A valid WAV file has at least a 44-byte header; anything less is an empty/failed output
+      if (out.length < 44) {
+        return reject(new Error(`ffmpeg output too small (${out.length} bytes) — conversion produced no audio`));
+      }
+      resolve(out);
+    });
+
+    ff.on('error', (err) => { clearTimeout(timer); reject(err); });
+
+    // Write the entire input then close stdin so ffmpeg sees EOF
+    ff.stdin.write(inputBuffer);
+    ff.stdin.end();
+  });
 }
 
+/**
+ * Convert a complete M4A buffer to LINEAR16 WAV (16 kHz, mono).
+ * Attempts twice: first with an explicit MP4 container hint, then without.
+ *
+ * @param {string} audioBase64  - base64-encoded M4A bytes
+ * @returns {Promise<string>}   - base64-encoded WAV bytes
+ * @throws if both attempts fail
+ */
 async function convertM4aToLinear16Wav(audioBase64) {
   const inputBuffer = Buffer.from(audioBase64, 'base64');
-  const inputStream = bufferToStream(inputBuffer);
 
-  return new Promise((resolve, reject) => {
-    const chunks = [];
+  const BASE_ARGS = [
+    '-y',
+    '-i', 'pipe:0',        // read from stdin
+    '-f', 'wav',           // output format: WAV container
+    '-acodec', 'pcm_s16le',// codec: signed 16-bit little-endian PCM
+    '-ar', '16000',        // sample rate: 16 kHz (Google STT optimal)
+    '-ac', '1',            // channels: mono
+    'pipe:1',              // write to stdout
+  ];
 
-    ffmpeg(inputStream)
-      .format('wav')
-      .audioCodec('pcm_s16le')
-      .audioChannels(1)
-      .audioFrequency(16000)
-      .on('error', (err) => {
-        console.error('[STT] ffmpeg conversion error:', err);
-        reject(err);
-      })
-      .on('end', () => {
-        const outputBuffer = Buffer.concat(chunks);
-        const outputBase64 = outputBuffer.toString('base64');
-        resolve(outputBase64);
-      })
-      .pipe()
-      .on('data', (chunk) => chunks.push(chunk));
-  });
+  // Attempt 1: explicit MP4 format hint — fastest, works for standard Expo recordings
+  try {
+    const wav = await runFfmpeg(inputBuffer, ['-f', 'mp4', ...BASE_ARGS]);
+    return wav.toString('base64');
+  } catch (firstErr) {
+    console.warn(`[STT] ffmpeg attempt 1 (mp4 hint) failed: ${firstErr.message} — retrying`);
+  }
+
+  // Attempt 2: no format hint — let ffmpeg probe the container
+  const wav = await runFfmpeg(inputBuffer, BASE_ARGS);
+  return wav.toString('base64');
 }
 
 export async function transcribeAudio(
@@ -87,15 +153,23 @@ export async function transcribeAudio(
 
   const isFallback = options?.isFallback === true;
 
-  // If we receive M4A from native (Expo) clients, convert once to WAV/LINEAR16
-  // so Google STT v1 gets a fully supported format.
+  // M4A from native (Expo) clients must be converted to LINEAR16 WAV.
+  // Google STT v1 has no reliable M4A auto-detection; sending raw M4A
+  // without an explicit encoding field causes "bad encoding" errors.
+  //
+  // On conversion failure we THROW rather than falling through — sending
+  // unconverted M4A to Google STT is guaranteed to fail anyway, and the
+  // caller's finally block will cleanly release sttInFlight.
   if (mimeType === 'audio/m4a') {
-    console.log('[STT] Converting audio/m4a to audio/wav (LINEAR16,16kHz) before STT');
+    console.log('[STT] Converting audio/m4a → LINEAR16 WAV (16 kHz mono)');
     try {
       audioBase64 = await convertM4aToLinear16Wav(audioBase64);
       mimeType = 'audio/wav';
+      console.log('[STT] M4A conversion OK');
     } catch (err) {
-      console.error('[STT] Failed to convert M4A to WAV; falling back to original audio.', err);
+      // Re-throw so the audio-chunk handler drops this chunk cleanly.
+      // sttInFlight is released in the handler's finally block.
+      throw new Error(`M4A→WAV conversion failed — chunk skipped: ${err.message}`);
     }
   }
 

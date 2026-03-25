@@ -589,12 +589,18 @@ export default function App() {
     };
     socket.on('meeting-speech-transcript', onMeetingSpeechTranscript);
 
-    // ── Same-language passthrough: play the sender's original voice directly ──
-    // No mic gating here — this is full-duplex; the receiver's own audio-chunk
-    // pipeline is independent of hearing the sender's raw voice.
+    // ── Audio passthrough: play the sender's original voice directly ──────────
+    // setTtsPlaying(true) mutes the VAD mic while the peer's audio plays through
+    // the device speaker. Without this gate the receiver's own microphone picks
+    // up the speaker output and re-transmits it as their own audio-chunk,
+    // creating an echo / feedback loop.
     const onAudioPassthrough = ({ audioBase64 }: { audioBase64: string }) => {
       if (isSpeakerRef.current && audioBase64) {
-        playAudio(audioBase64);
+        playAudio(
+          audioBase64,
+          () => setTtsPlaying(true),   // mute receiver's mic while peer voice plays
+          () => setTtsPlaying(false),  // restore mic after playback ends
+        );
       }
     };
     socket.on('audio-passthrough', onAudioPassthrough);
