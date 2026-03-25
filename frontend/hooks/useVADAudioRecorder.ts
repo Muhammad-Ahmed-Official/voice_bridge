@@ -87,8 +87,16 @@ const NATIVE_CYCLE_MS = 3_000;
 
 type OnChunk = (audioBase64: string, mimeType: string) => void;
 
+/** RN / Hermes: DOMException is undefined — use plain Error for abortable waits. */
+const ABORTED_WAIT_MESSAGE = 'Aborted';
+
+function isAbortedWaitError(e: unknown): boolean {
+  return e instanceof Error && e.message === ABORTED_WAIT_MESSAGE;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Interruptible delay; rejects with Error(ABORTED_WAIT_MESSAGE) when signal aborts. */
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const id = setTimeout(resolve, ms);
@@ -97,7 +105,7 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
       'abort',
       () => {
         clearTimeout(id);
-        reject(new DOMException('Aborted', 'AbortError'));
+        reject(new Error(ABORTED_WAIT_MESSAGE));
       },
       { once: true },
     );
@@ -678,8 +686,8 @@ export function useVADAudioRecorder() {
       } else if (uri && isTtsPlayingRef.current) {
         await FileSystemLegacy.deleteAsync(uri, { idempotent: true }).catch(() => {});
       }
-    } catch (outerErr: any) {
-      if (outerErr?.name === 'AbortError') {
+    } catch (outerErr: unknown) {
+      if (isAbortedWaitError(outerErr)) {
         try {
           await nativeRecorder.stop();
         } catch {
@@ -721,5 +729,14 @@ export function useVADAudioRecorder() {
     }
   }, []);
 
-  return { startRecording, stopRecording, setTtsPlaying, warmUpAudio };
+  /**
+   * Interrupt the current native recording window (AbortController + wait teardown).
+   * Duplex resumes automatically when `setTtsPlaying(false)` after playback.
+   * Web: no-op (VAD loop uses isTtsPlayingRef only).
+   */
+  const stopRecordingImmediately = useCallback((): void => {
+    nativeAbortRef.current?.abort();
+  }, []);
+
+  return { startRecording, stopRecording, setTtsPlaying, warmUpAudio, stopRecordingImmediately };
 }

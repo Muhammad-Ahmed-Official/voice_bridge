@@ -133,6 +133,9 @@ export function useAudioPlayer() {
     } else {
       // ── Native: expo-audio ─────────────────────────────────────────────────
       try {
+        // Stop / yield recorder BEFORE session + player so TTS can grab the route.
+        await Promise.resolve(onStart?.());
+
         // Set iOS audio session once: allowsRecording=true keeps the mic active
         // during TTS playback (iOS would otherwise suspend it).
         if (!audioModeReadyRef.current) {
@@ -177,7 +180,6 @@ export function useAudioPlayer() {
         // Safety net: force-release after 60 s (avoids leaking stale players)
         playerTimerRef.current = setTimeout(markEnded, 60_000);
 
-        await Promise.resolve(onStart?.());
         player.play();
 
       } catch (err: any) {
