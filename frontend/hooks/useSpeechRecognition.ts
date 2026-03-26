@@ -1,24 +1,11 @@
 import { useRef, useCallback } from 'react';
 import { Platform } from 'react-native';
 
-// Languages supported by Chrome Web Speech API
-// Urdu (ur-PK) is NOT supported by Web Speech API - must use Google Cloud STT
 const WEB_SPEECH_SUPPORTED_LOCALES = [
-  'en-US', 'en-GB', 'en-AU', 'en-IN',
-  'ar-SA', 'ar-EG', 'ar-AE',
-  'es-ES', 'es-MX',
-  'fr-FR',
-  'de-DE',
-  'hi-IN',
-  'zh-CN', 'zh-TW',
-  'ja-JP',
-  'ko-KR',
+  'es-ES', 'fr-FR', 'de-DE' // Keep only languages you DON'T want to clone.
 ];
 
 export function isWebSpeechSupported(locale: string): boolean {
-  // Mobile pe Web Speech API available nahi hai
-  // Expo Go mein @react-native-voice/voice bhi kaam nahi karta
-  // So mobile pe hamesha false return karo - audio recorder use hoga
   if (Platform.OS !== 'web') return false;
   
   return WEB_SPEECH_SUPPORTED_LOCALES.some(l => 
@@ -123,9 +110,7 @@ export function useSpeechRecognition() {
           return false;
         }
       } else {
-        // Native / non-web:
-        // We don't use a native on-device STT engine anymore.
-        // Mobile STT is handled via the audio-recorder pipeline + backend STT.
+       
         return false;
       }
     },

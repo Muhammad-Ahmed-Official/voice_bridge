@@ -1,18 +1,3 @@
-/**
- * useAudioPlayer
- *
- * Encapsulates all TTS / passthrough audio playback for both web and native.
- *
- * Design goals:
- *  - One active player at a time: new audio cancels the previous (prevents overlap)
- *  - Proper resource cleanup: players are removed after playback + on unmount
- *  - AudioMode set once per hook lifetime (not per-play): avoids repeat iOS session calls
- *  - Stable `playAudio` / `stopAudio` references (useCallback): safe in useEffect deps
- *
- * Web:   HTMLAudioElement (no expo-audio involved — browser handles MP3 natively)
- * Native: expo-audio `createAudioPlayer` (imperative API — supports dynamic base64 sources)
- */
-
 import { useRef, useCallback, useEffect } from 'react';
 import { Platform } from 'react-native';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
@@ -136,8 +121,7 @@ export function useAudioPlayer() {
         // Stop / yield recorder BEFORE session + player so TTS can grab the route.
         await Promise.resolve(onStart?.());
 
-        // Set iOS audio session once: allowsRecording=true keeps the mic active
-        // during TTS playback (iOS would otherwise suspend it).
+       
         if (!audioModeReadyRef.current) {
           await setAudioModeAsync({
             playsInSilentMode: true,
@@ -191,13 +175,9 @@ export function useAudioPlayer() {
     }
   }, []);
 
-  /**
-   * Stop any currently playing audio and fire the pending onEnd callback.
-   * Call this when a call ends to cleanly release all resources.
-   */
   const stopAudio = useCallback(() => {
     stopCurrentPlayer(true); // fire onEnd so TTS gate is lifted
   }, []);
 
-  return { playAudio, stopAudio };
+  return { playAudio, stopAudio, stopCurrentPlayer };
 }

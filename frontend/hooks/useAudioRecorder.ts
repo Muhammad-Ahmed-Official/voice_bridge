@@ -12,8 +12,6 @@ const CYCLE_MS = 4000; // record 4-second chunks, send each to Google STT
 
 export function useAudioRecorder() {
   const activeRef = useRef(false);
-  // Use expo-audio built-in high quality preset for native;
-  // web path below still uses getUserMedia + MediaRecorder.
   const recorder = useExpoAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const streamRef = useRef<MediaStream | null>(null);
 

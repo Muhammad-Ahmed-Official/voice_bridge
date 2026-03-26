@@ -150,7 +150,8 @@ export async function transcribeAudio(
   // Modify the config object inside transcribeAudio
   const config = {
     languageCode, // The primary language (e.g., 'ur-PK')
-    alternativeLanguageCodes: ['en-US', 'ar-SA'], // Add these as alternatives
+    // alternativeLanguageCodes: ['en-US', 'ar-SA'], // Add these as alternatives
+    alternativeLanguageCodes: [],
     enableAutomaticPunctuation: true,
     model,
     useEnhanced: true, // Use for EN and AR for better results
@@ -208,33 +209,37 @@ export async function transcribeAudio(
   }
 
     // --- Find this part at the end of transcribeAudio ---
-    const transcript = data.results?.[0]?.alternatives?.[0]?.transcript ?? '';
-    if (transcript.trim()) {
-      console.log(`[STT] Recognized (${languageCode}): "${transcript}"`);
-      const targetLanguage = options?.targetLanguage || 'en-US'; 
-  
-      try {
-        const translationResult = await translateText(transcript, languageCode, targetLanguage);
-        if (translationResult.success) {
-          console.log(`[STT] Final Translated Text: "${translationResult.text}"`);
-          return translationResult.text; // This text goes to ElevenLabs
-        }
-      } catch (transError) {
-        console.error('[STT] Translation error, falling back to original:', transError.message);
-      }
-    }
+  const transcript = data.results?.[0]?.alternatives?.[0]?.transcript ?? '';
+  if (transcript.trim()) {
+    console.log(`[STT] Recognized (${languageCode}): "${transcript}"`);
+    return transcript;
+  }
   return transcript;
 }
   
-  // const transcript = data.results?.[0]?.alternatives?.[0]?.transcript ?? '';
-  // // Only log non-empty transcripts to reduce noise
-  // if (transcript.trim()) {
-  //   console.log(`[STT] Transcript (${languageCode}): "${transcript}"`);
-  // }
-  // return transcript;
-    // const config = {
-  //   languageCode,
-  //   enableAutomaticPunctuation: true,
-  //   model,
-  //   ...(supportsEnhanced ? { useEnhanced: true } : {}),
-  // };
+
+
+// const targetLanguage = options?.targetLanguage || 'en-US'; 
+// try {
+//   const translationResult = await translateText(transcript, languageCode, targetLanguage);
+//   if (translationResult.success) {
+//     console.log(`[STT] Final Translated Text: "${translationResult.text}"`);
+//     return translationResult.text; // This text goes to ElevenLabs
+//   }
+// } catch (transError) {  
+//   console.error('[STT] Translation error, falling back to original:', transError.message);
+// }
+
+
+// const transcript = data.results?.[0]?.alternatives?.[0]?.transcript ?? '';
+// // Only log non-empty transcripts to reduce noise
+// if (transcript.trim()) {
+//   console.log(`[STT] Transcript (${languageCode}): "${transcript}"`);
+// }
+// return transcript;
+// const config = {
+//   languageCode,
+//   enableAutomaticPunctuation: true,
+//   model,
+//   ...(supportsEnhanced ? { useEnhanced: true } : {}),
+// };

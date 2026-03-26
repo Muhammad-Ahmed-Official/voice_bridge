@@ -167,7 +167,7 @@ export default function App() {
   const { socket } = useSocket(user?.userId ?? null, user?._id ?? null);
   const { startListening, stopListening } = useSpeechRecognition();
   const { startRecording, stopRecording, setTtsPlaying, warmUpAudio } = useVADAudioRecorder();
-  const { playAudio, stopAudio } = useAudioPlayer();
+  const { playAudio, stopAudio, stopCurrentPlayer } = useAudioPlayer();
   const { devices: btDevices, isScanning: btScanning, scanError: btScanError, startScan: btStartScan, stopScan: btStopScan, isBleSupported } = useBluetooth();
 
   // Track which STT mode is being used: 'browser' | 'audio-recorder' | null
@@ -401,19 +401,13 @@ export default function App() {
 
     // ── Voice Cloning status events ───────────────────────────────────────────
     const onCloneStarted = () => setCloneStatus('buffering');
-    const onCloneReady   = () => setCloneStatus('ready');
-    // 'clone-failed' is emitted for both limit-hit and transient errors.
-    // Either way the fallback is passthrough — show "Using original voice" silently.
+    const onCloneReady   = (data: { voiceId: string }) => setCloneStatus('ready');
     const onCloneFailed  = () => setCloneStatus('using-original');
 
     socket.on('clone-started', onCloneStarted);
     socket.on('clone-ready',   onCloneReady);
     socket.on('clone-failed',  onCloneFailed);
 
-    // When the socket reconnects the backend has already deleted the room
-    // (via the disconnect handler). The reconnecting client never receives
-    // peer-disconnected, so without this it would keep sending stale audio
-    // chunks and see endless "room not found" errors.
     const onReconnect = () => {
       if (roomIdRef.current) {
         stopAudio();
@@ -469,8 +463,6 @@ export default function App() {
   useEffect(() => {
     if (!socket) return;
 
-    // Early gate: backend emits tts-start right before sending translated-text with audio.
-    // Pause the mic immediately so the VAD loop doesn't capture the incoming TTS.
     const onTtsStart = () => {
       setTtsPlaying(true);
     };
@@ -478,9 +470,7 @@ export default function App() {
 
     const onTranslatedText = ({ text, audioBase64, captionOnly }: { text: string; audioBase64?: string; captionOnly?: boolean }) => {
       console.log('[pipeline] translated-text received:', text, 'captionOnly:', captionOnly, 'isSpeaker:', isSpeakerRef.current);
-      if (isSpeakerRef.current && !captionOnly) {
-        // captionOnly=true means cloning is ON and the real voice is already
-        // playing via audio-passthrough. Do NOT play TTS or browser speech here.
+      if (!captionOnly) {
         if (audioBase64) {
           playAudio(
             audioBase64,
@@ -503,24 +493,62 @@ export default function App() {
     socket.on('speech-transcript', onSpeechTranscript);
 
     // ── Meeting translated text ────────────────────────────────────────────────
-    const onMeetingTranslated = ({ text, audioBase64, fromUserId }: { text: string; audioBase64?: string; fromUserId: string; meetingId: string }) => {
+    // const onMeetingTranslated = ({ text, audioBase64, fromUserId }: { text: string; audioBase64?: string; fromUserId: string; meetingId: string }) => {
+    //   const cfg = activeConfigRef.current;
+    //   if (!cfg) return;
+    //   const idx = cfg.findIndex((p: any) => p.userId === fromUserId);
+    //   if (idx === -1) return;
+    //   // if (isSpeakerRef.current) {
+    //     if (audioBase64) {
+    //       playAudio(
+    //         audioBase64,
+    //         () => setTtsPlaying(true),
+    //         () => { setTtsPlaying(false); socket.emit('tts-end'); },
+    //       );
+    //     } else if (Platform.OS === 'web') {
+    //       speakText(text, LOCALE_MAP[hearLangRef.current]);
+    //     }
+    //   // }
+    //   setLiveTranscript(prev => ({ ...prev, [idx]: text }));
+    // };
+
+    const onMeetingTranslated = ({
+      text,
+      audioBase64,
+      fromUserId,
+      meetingId,
+    }: {
+      text: string;
+      audioBase64?: string;
+      fromUserId: string;
+      meetingId: string;
+    }) => {
       const cfg = activeConfigRef.current;
       if (!cfg) return;
       const idx = cfg.findIndex((p: any) => p.userId === fromUserId);
       if (idx === -1) return;
-      if (isSpeakerRef.current) {
-        if (audioBase64) {
-          playAudio(
-            audioBase64,
-            () => setTtsPlaying(true),
-            () => { setTtsPlaying(false); socket.emit('tts-end'); },
-          );
-        } else if (Platform.OS === 'web') {
-          speakText(text, LOCALE_MAP[hearLangRef.current]);
-        }
+    
+      // Play audio safely
+      if (audioBase64) {
+        // Stop any current audio for this speaker
+        stopCurrentPlayer(); // from useAudioPlayer
+    
+        playAudio(
+          audioBase64,
+          () => setTtsPlaying(true),
+          () => { 
+            setTtsPlaying(false); 
+            socket.emit('tts-end', { fromUserId }); 
+          },
+        );
+      } else if (Platform.OS === 'web') {
+        speakText(text, LOCALE_MAP[hearLangRef.current]);
       }
+    
+      // Update transcript for UI
       setLiveTranscript(prev => ({ ...prev, [idx]: text }));
     };
+
     socket.on('meeting-translated', onMeetingTranslated);
 
     const onMeetingSpeechTranscript = ({ text }: { text: string }) => {
@@ -534,7 +562,7 @@ export default function App() {
     // up the speaker output and re-transmits it as their own audio-chunk,
     // creating an echo / feedback loop.
     const onAudioPassthrough = ({ audioBase64 }: { audioBase64: string }) => {
-      if (isSpeakerRef.current && audioBase64) {
+      if (audioBase64) {
         playAudio(
           audioBase64,
           () => setTtsPlaying(true),   // mute receiver's mic while peer voice plays
@@ -844,7 +872,6 @@ export default function App() {
                 style={[styles.actionCircle, { backgroundColor: THEME.success }]}
                 onPress={() => {
                   warmUpAudio(); // pre-create AudioContext in user-gesture frame
-                  // Update global state with selected languages before accepting
                   setSpeakLang(callInviteSpeakLang);
                   setHearLang(callInviteHearLang);
 
@@ -1214,8 +1241,6 @@ export default function App() {
           })()}
         </SafeAreaView>
       )}
-
-
       {screen === 'settings' && <SafeAreaView style={styles.darkPage}><Header title="Profile" /><View style={{ padding: 20 }}><View style={styles.profileBox}><View style={styles.profileAvatar}><Text style={styles.profileLetter}>{user?.name?.charAt(0) ?? '?'}</Text></View><View><Text style={styles.profileName}>{user?.name}</Text><Text style={styles.profileId}>ID: {user?.userId}</Text></View></View><TouchableOpacity style={styles.logoutBtn} onPress={() => { logout(); setScreen('auth'); }}><LogOut size={18} color={THEME.danger} /><Text style={styles.logoutText}>Sign Out</Text></TouchableOpacity></View></SafeAreaView>}
     </View>
   );
@@ -1359,19 +1384,3 @@ const btStyles = StyleSheet.create({
   pairedBadge: { backgroundColor: THEME.success, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
   pairedBadgeText: { color: '#fff', fontWeight: '700', fontSize: 11 },
 });
-
-
-// Concept: Room-Based 1-to-1 Bridge
-// Caller creates a room:
-// They generate a roomId (could be random or based on user IDs).
-// They click Initialize Secure Bridge, registering their socket and room.
-// Receiver joins the room:
-// Frontend can listen for active rooms or poll backend.
-// Backend can store the caller’s info in the room.
-// Receiver only needs to select their output language and click Initialize.
-// Backend now knows which two sockets are in the same room.
-// Audio chunk flow:
-// User A speaks → backend STT → translate → TTS → send to User B socket.
-// User B speaks → backend STT → translate → TTS → send to User A socket.
-// Advantage: Receiver doesn’t need to manually type caller ID — the backend knows which sockets are in the room
-// Translation @vitalets/google-translate-api,  STT Google Speech-to-Text free tier, TTS google-tts-api,

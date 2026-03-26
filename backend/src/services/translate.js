@@ -2,7 +2,20 @@ import { v2 } from '@google-cloud/translate';
 import fs from 'fs';
 import path from 'path';
 
-const LANG_MAP = { UR: 'ur', EN: 'en', AR: 'ar' };
+// const LANG_MAP = { UR: 'ur', EN: 'en', AR: 'ar' };
+const LANG_MAP = {
+  UR: 'ur',
+  EN: 'en',
+  AR: 'ar',
+
+  'ur-PK': 'ur',
+  'en-US': 'en',
+  'ar-SA': 'ar',
+
+  ur: 'ur',
+  en: 'en',
+  ar: 'ar'
+};
 
 let translateClient = null;
 

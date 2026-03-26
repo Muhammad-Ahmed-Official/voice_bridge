@@ -1,61 +1,3 @@
-/**
- * useVADAudioRecorder — v4
- *
- * ─── ROOT CAUSE OF v3 FAILURE (rms≈0.00001 despite mic permission) ───────────
- *
- *  v3 created `new AudioContext()` INSIDE the `getUserMedia().then()` callback.
- *  That callback is a microtask continuation — it is NOT a user-gesture frame.
- *  Chrome 70+ / Safari 14.1+ refuse to auto-start an AudioContext whose creation
- *  was not synchronously triggered by a click/keydown/touchstart event.
- *  Result:
- *    • ctx.state = 'suspended'
- *    • ctx.resume() silently queues but never executes (no gesture context)
- *    • analyser.getFloatTimeDomainData() returns the initial all-zero buffer
- *    • RMS = sqrt(0 / N) ≈ 0 → VAD never fires → no chunks ever sent
- *
- *  Evidence: threshold degrades to 0.001 (minimum after 3+ automatic halvings)
- *  while RMS stays at ~0.00001 — 100× below the floor. This cannot be a
- *  threshold misconfiguration; it is structurally zero data.
- *
- * ─── FIXES IN v4 ─────────────────────────────────────────────────────────────
- *
- *  1. AudioContext created SYNCHRONOUSLY in startWebRecording(), which is itself
- *     called synchronously from the button onClick handler → full user-gesture
- *     stack → ctx.state = 'running' immediately.
- *
- *  2. Separate raw stream for the VAD analyser:
- *       echoCancellation: false, noiseSuppression: false
- *     The processed stream (with EC/NS) is used only for MediaRecorder.
- *     Echo-cancellation can suppress the signal below detection threshold.
- *
- *  3. GainNode (gain = 5) between the raw source and the analyser.
- *     Low-sensitivity mics or OS-level attenuation keep some devices near 0.002;
- *     5× amplification ensures they clear the MIN_THRESHOLD reliably.
- *
- *  4. Track verification: checks track.enabled, track.muted, track.readyState
- *     and logs selected device name + effective stream settings.
- *
- *  5. Device enumeration: logs all available audio input devices at startup.
- *
- *  6. Forced fallback chunk: if VAD hasn't fired 8 s after calibration, start
- *     a 1.5 s forced MediaRecorder segment instead of just halving the threshold.
- *     This verifies the audio pipeline and sends data to STT regardless.
- *
- *  7. AudioContext state monitor: 5 s polling after startup; warns if ctx
- *     transitions back to 'suspended' (e.g. browser background tab).
- *
- * ─── AUDIO GRAPH ─────────────────────────────────────────────────────────────
- *
- *  getUserMedia (raw, no EC/NS)
- *    → MediaStreamSource
- *    → GainNode (gain=5)
- *    → AnalyserNode (fftSize=2048, smoothing=0)
- *    → VAD state machine → MediaRecorder (processed stream)
- *
- *  getUserMedia (processed, EC+NS+AGC) — separate call
- *    → MediaRecorder for actual audio segments sent to backend
- */
-
 import { useRef, useCallback } from 'react';
 import { Platform } from 'react-native';
 import {
@@ -407,15 +349,7 @@ export function useVADAudioRecorder() {
     }
   }
 
-  // ── Web: pre-warm AudioContext during user gesture ────────────────────────
-  //
-  // Call this from EVERY button that can lead to a call starting (call-user,
-  // accept-call, Initialize Secure Bridge).  Those are real user-gesture frames.
-  // startWebRecording() runs later from a useEffect (socket callback path) which
-  // is NOT a gesture frame — creating AudioContext there would leave it suspended.
-  //
-  // warmUpAudio() creates and immediately resumes the AudioContext while the
-  // gesture is still on the call stack.  startWebRecording() will reuse it.
+  
   const warmUpAudio = useCallback(() => {
     if (Platform.OS !== 'web') return;
     if (typeof AudioContext === 'undefined') return;
@@ -439,10 +373,6 @@ export function useVADAudioRecorder() {
   function startWebRecording(onChunk: OnChunk, onDenied?: () => void) {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices) return;
 
-    // ── FIX #1: Reuse pre-warmed AudioContext (created in user gesture) ───
-    // If warmUpAudio() was called from the button press, audioCtxRef already
-    // holds a 'running' context.  If not (e.g. direct call from active screen),
-    // try to create one now — it may be suspended, but we still set it up.
     let ctx: AudioContext;
     if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
       ctx = audioCtxRef.current;
@@ -729,11 +659,6 @@ export function useVADAudioRecorder() {
     }
   }, []);
 
-  /**
-   * Interrupt the current native recording window (AbortController + wait teardown).
-   * Duplex resumes automatically when `setTtsPlaying(false)` after playback.
-   * Web: no-op (VAD loop uses isTtsPlayingRef only).
-   */
   const stopRecordingImmediately = useCallback((): void => {
     nativeAbortRef.current?.abort();
   }, []);

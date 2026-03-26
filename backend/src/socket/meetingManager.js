@@ -35,7 +35,7 @@ export function participantJoined(meetingId, userId, socketId, speakLang, hearLa
   entry.speakLang = speakLang;
   entry.hearLang = hearLang;
   entry.status = 'joined';
-  entry.voiceCloningEnabled = false; 
+  entry.voiceCloningEnabled = entry.voiceCloningEnabled ?? false;
   socketMeetingMap.set(socketId, meetingId);
 }
 

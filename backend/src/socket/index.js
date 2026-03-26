@@ -184,7 +184,7 @@ function bufferAndTranslate( io, socket, roomId, text, speakLang, hearLang, rece
 
       io.to(receiver.socketId).emit('translated-text', {
         text:        result.text,
-        audioBase64: ttsAudio,
+        audioBase64: ttsAudio || null,
         fromUserId:  socket.data.userId,
         captionOnly: false,
       });
@@ -588,7 +588,7 @@ export function initSocket(httpServer) {
       // Gate 1: drop chunk if a previous STT call is still in-flight
       if (sttInFlight.get(socket.id)) return;
       // Gate 2: drop chunk while receiver is playing TTS (prevents echo)
-      if (ttsInFlight.get(socket.id)) return;
+      if (ttsInFlight.get(receiver.socketId)) return;
 
       sttInFlight.set(socket.id, true);
       try {
