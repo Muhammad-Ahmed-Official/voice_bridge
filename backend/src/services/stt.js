@@ -136,25 +136,18 @@ export async function transcribeAudio(
   const encodingConfig = ENCODING_MAP[mimeType] ?? { encoding: 'WEBM_OPUS' };
 
 
-  let model = isFallback ? 'default' : (LANGUAGE_MODEL_MAP[languageCode] ?? 'default');
-  let supportsEnhanced =
-    !isFallback && (languageCode === 'en-US' || languageCode === 'ar-SA');
-
-  if (mimeType === 'audio/m4a') {
-    model = 'default';
-    supportsEnhanced = false;
-  }
+  // Urdu (ur-PK) does not support the enhanced model — only EN and AR do.
+  const model = isFallback ? 'default' : (LANGUAGE_MODEL_MAP[languageCode] ?? 'default');
+  const supportsEnhanced = !isFallback && (languageCode === 'en-US' || languageCode === 'ar-SA');
 
   console.log(`[STT] Processing: mimeType=${mimeType}, encoding=${encodingConfig.encoding}, lang=${languageCode}`);
 
-  // Modify the config object inside transcribeAudio
   const config = {
-    languageCode, // The primary language (e.g., 'ur-PK')
-    // alternativeLanguageCodes: ['en-US', 'ar-SA'], // Add these as alternatives
+    languageCode,
     alternativeLanguageCodes: [],
     enableAutomaticPunctuation: true,
     model,
-    useEnhanced: true, // Use for EN and AR for better results
+    useEnhanced: supportsEnhanced,  // false for ur-PK — avoids guaranteed 400 + retry
   };
 
 

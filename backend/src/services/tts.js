@@ -73,13 +73,15 @@ export async function synthesizeSpeech(text, locale) {
  *
  * @param {Object} params
  * @param {string} params.text
- * @param {string} params.locale          - Target locale for the listener.
- * @param {string} params.speakerUserId   - Logical userId of the speaker.
- * @param {string} [params.clonedVoiceId] - In-memory cloned voice_id if clone is ready.
- *                                          Bypasses DB lookup and avoids the DB write race.
+ * @param {string} params.locale               - Target locale for the listener.
+ * @param {string} params.speakerUserId        - Logical userId of the speaker.
+ * @param {string} [params.clonedVoiceId]      - In-memory cloned voice_id if clone is ready.
+ *                                               Bypasses DB lookup and avoids the DB write race.
+ * @param {boolean} [params.listenerCloningEnabled=false] - Whether the listener has cloning ON.
+ *                                               When true, cloning is suppressed (CASE 2 / CASE 3).
  * @returns {Promise<string|null>} Base64-encoded MP3 audio.
  */
-export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId, cloningEnabled }) {
+export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId, cloningEnabled, listenerCloningEnabled = false }) {
   if (!text || !text.trim()) return null;
 
   if (!clonedVoiceId && cloningEnabled === false) {
@@ -107,6 +109,12 @@ export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId
 
   if (speakerUserId) {
     try {
+      // Guard: if listener has cloning enabled, we are in CASE 2 or CASE 3 — never clone.
+      if (listenerCloningEnabled) {
+        console.log(`[TTS Router] GOOGLE TTS (listener cloning gate) — speaker=${speakerUserId} locale=${locale}`);
+        return synthesizeSpeech(text, locale);
+      }
+
       const user = await User.findOne({ userId: speakerUserId }).lean();
       const cloningEnabled = !!user?.voiceCloningEnabled;
 
