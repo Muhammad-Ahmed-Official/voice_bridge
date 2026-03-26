@@ -167,7 +167,7 @@ export default function App() {
   const { socket } = useSocket(user?.userId ?? null, user?._id ?? null);
   const { startListening, stopListening } = useSpeechRecognition();
   const { startRecording, stopRecording, setTtsPlaying, warmUpAudio } = useVADAudioRecorder();
-  const { playAudio, stopAudio, stopCurrentPlayer } = useAudioPlayer();
+  const { playAudio, stopAudio } = useAudioPlayer();
   const { devices: btDevices, isScanning: btScanning, scanError: btScanError, startScan: btStartScan, stopScan: btStopScan, isBleSupported } = useBluetooth();
 
   // Track which STT mode is being used: 'browser' | 'audio-recorder' | null
@@ -528,11 +528,8 @@ export default function App() {
       const idx = cfg.findIndex((p: any) => p.userId === fromUserId);
       if (idx === -1) return;
     
-      // Play audio safely
+      // Queue playback safely (FIFO) to avoid overlap/glitches
       if (audioBase64) {
-        // Stop any current audio for this speaker
-        stopCurrentPlayer(); // from useAudioPlayer
-    
         playAudio(
           audioBase64,
           () => setTtsPlaying(true),

@@ -4,27 +4,35 @@ import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer } from 'expo-audio';
 
 type PlayCallback = () => void | Promise<void>;
+type QueueItem = {
+  audioBase64: string;
+  onStart?: PlayCallback;
+  onEnd?: PlayCallback;
+};
 
 export function useAudioPlayer() {
   // ── Native player instance ──────────────────────────────────────────────────
-  const playerRef       = useRef<AudioPlayer | null>(null);
-  const playerSubRef    = useRef<{ remove: () => void } | null>(null);
-  const playerTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playerRef = useRef<AudioPlayer | null>(null);
+  const playerSubRef = useRef<{ remove: () => void } | null>(null);
+  const playerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Web audio instance ──────────────────────────────────────────────────────
   const webAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // ── Pending end callback (for the currently playing audio) ──────────────────
-  // Stored in a ref so stopCurrentPlayer() can fire it when interrupting mid-play.
-  const pendingOnEndRef = useRef<PlayCallback | null>(null);
+  // ── Queue & playback guards ────────────────────────────────────────────────
+  const queueRef = useRef<QueueItem[]>([]);
+  const isPlayingRef = useRef(false);
+  const processingRef = useRef(false);
 
   // ── Audio mode: initialised once, not per-play ──────────────────────────────
   const audioModeReadyRef = useRef(false);
 
-  // Cleanup on unmount — silence everything without firing onEnd callbacks
+  // Cleanup on unmount — clear queue and release players
   useEffect(() => {
     return () => {
-      pendingOnEndRef.current = null; // suppress onEnd on unmount
+      queueRef.current = [];
+      isPlayingRef.current = false;
+      processingRef.current = false;
       releaseCurrentPlayer();
     };
   }, []);
@@ -55,35 +63,20 @@ export function useAudioPlayer() {
     }
   }
 
-  // Stop current playback and optionally fire the queued onEnd callback.
-  function stopCurrentPlayer(fireOnEnd = false) {
-    const cb = pendingOnEndRef.current;
-    pendingOnEndRef.current = null;
+  // Stop current playback and clear queue.
+  function stopCurrentPlayer() {
+    queueRef.current = [];
+    isPlayingRef.current = false;
+    processingRef.current = false;
     releaseCurrentPlayer();
-    if (fireOnEnd) cb?.();
   }
 
-  // ─── Public API ─────────────────────────────────────────────────────────────
-
-  /**
-   * Play a base64-encoded MP3 audio string.
-   * Any previously playing audio is stopped immediately (not queued).
-   *
-   * @param audioBase64  - Base64 MP3 string (no data-URI prefix needed)
-   * @param onStart      - Called just before playback begins (use to mute mic)
-   * @param onEnd        - Called when playback finishes or errors (use to unmute mic)
-   */
-  const playAudio = useCallback(async (
+  const playSingleAudio = useCallback(async (
     audioBase64: string,
     onStart?: PlayCallback,
     onEnd?: PlayCallback,
   ) => {
     if (!audioBase64) return;
-
-    // Suppress the previous onEnd when interrupting (we're chaining, not stopping)
-    pendingOnEndRef.current = null;
-    releaseCurrentPlayer();
-
     console.log('[AudioPlayer] playAudio — bytes:', audioBase64.length);
 
     if (Platform.OS === 'web') {
@@ -91,37 +84,37 @@ export function useAudioPlayer() {
       try {
         const audio = new window.Audio('data:audio/mp3;base64,' + audioBase64);
         webAudioRef.current = audio;
-        pendingOnEndRef.current = onEnd ?? null;
-
-        const markEnded = () => {
-          if (webAudioRef.current === audio) webAudioRef.current = null;
-          const cb = pendingOnEndRef.current;
-          pendingOnEndRef.current = null;
-          cb?.();
-        };
-
-        audio.addEventListener('ended', markEnded, { once: true });
-        audio.addEventListener('error', () => {
-          console.warn('[AudioPlayer] web HTMLAudioElement error');
-          markEnded();
-        }, { once: true });
 
         await Promise.resolve(onStart?.());
-        await audio.play();
+
+        await new Promise<void>((resolve) => {
+          const markEnded = () => {
+            if (webAudioRef.current === audio) webAudioRef.current = null;
+            resolve();
+          };
+
+          audio.addEventListener('ended', markEnded, { once: true });
+          audio.addEventListener('error', () => {
+            console.warn('[AudioPlayer] web HTMLAudioElement error');
+            markEnded();
+          }, { once: true });
+
+          audio.play().catch((err) => {
+            console.warn('[AudioPlayer] web play() rejected:', err);
+            markEnded();
+          });
+        });
       } catch (err: any) {
         console.error('[AudioPlayer] web play error:', err?.message ?? err);
+      } finally {
         webAudioRef.current = null;
-        pendingOnEndRef.current = null;
-        onEnd?.();
+        await Promise.resolve(onEnd?.());
       }
-
     } else {
       // ── Native: expo-audio ─────────────────────────────────────────────────
       try {
-        // Stop / yield recorder BEFORE session + player so TTS can grab the route.
         await Promise.resolve(onStart?.());
 
-       
         if (!audioModeReadyRef.current) {
           await setAudioModeAsync({
             playsInSilentMode: true,
@@ -135,49 +128,86 @@ export function useAudioPlayer() {
           uri: 'data:audio/mp3;base64,' + audioBase64,
         });
         playerRef.current = player;
-        pendingOnEndRef.current = onEnd ?? null;
 
-        let finished = false;
-        const markEnded = () => {
-          if (finished) return;
-          finished = true;
-          if (playerRef.current === player) playerRef.current = null;
-          if (playerTimerRef.current) {
-            clearTimeout(playerTimerRef.current);
-            playerTimerRef.current = null;
-          }
-          if (playerSubRef.current) {
-            try { playerSubRef.current.remove(); } catch {}
-            playerSubRef.current = null;
-          }
-          try { player.remove?.(); } catch {}
-          const cb = pendingOnEndRef.current;
-          pendingOnEndRef.current = null;
-          cb?.();
-        };
+        await new Promise<void>((resolve) => {
+          let finished = false;
+          const markEnded = () => {
+            if (finished) return;
+            finished = true;
+            if (playerRef.current === player) playerRef.current = null;
+            if (playerTimerRef.current) {
+              clearTimeout(playerTimerRef.current);
+              playerTimerRef.current = null;
+            }
+            if (playerSubRef.current) {
+              try { playerSubRef.current.remove(); } catch {}
+              playerSubRef.current = null;
+            }
+            try { player.remove?.(); } catch {}
+            resolve();
+          };
 
-        const sub = player.addListener('playbackStatusUpdate', (status) => {
-          if (status?.didJustFinish) markEnded();
+          const sub = player.addListener('playbackStatusUpdate', (status) => {
+            if (status?.didJustFinish) markEnded();
+          });
+          playerSubRef.current = sub;
+
+          // Safety net: force-release after 60 s (avoids leaking stale players)
+          playerTimerRef.current = setTimeout(markEnded, 60_000);
+
+          player.play();
         });
-        playerSubRef.current = sub;
-
-        // Safety net: force-release after 60 s (avoids leaking stale players)
-        playerTimerRef.current = setTimeout(markEnded, 60_000);
-
-        player.play();
-
       } catch (err: any) {
         console.error('[AudioPlayer] native play error:', err?.message ?? err);
+      } finally {
         playerRef.current = null;
-        pendingOnEndRef.current = null;
-        onEnd?.();
+        await Promise.resolve(onEnd?.());
       }
     }
   }, []);
 
+  const processQueue = useCallback(async () => {
+    if (processingRef.current) return;
+    processingRef.current = true;
+
+    try {
+      while (queueRef.current.length > 0) {
+        const item = queueRef.current.shift();
+        if (!item || !item.audioBase64) continue;
+        isPlayingRef.current = true;
+        await playSingleAudio(item.audioBase64, item.onStart, item.onEnd);
+      }
+    } finally {
+      isPlayingRef.current = false;
+      processingRef.current = false;
+    }
+  }, [playSingleAudio]);
+
+  // ─── Public API ─────────────────────────────────────────────────────────────
+
+  /**
+   * Queue a base64-encoded MP3 chunk. Chunks are played sequentially in FIFO order.
+   */
+  const playAudio = useCallback(async (
+    audioBase64: string,
+    onStart?: PlayCallback,
+    onEnd?: PlayCallback,
+  ) => {
+    if (!audioBase64) return;
+    queueRef.current.push({ audioBase64, onStart, onEnd });
+    if (!processingRef.current) {
+      await processQueue();
+    }
+  }, [processQueue]);
+
   const stopAudio = useCallback(() => {
-    stopCurrentPlayer(true); // fire onEnd so TTS gate is lifted
+    stopCurrentPlayer();
   }, []);
 
-  return { playAudio, stopAudio, stopCurrentPlayer };
+  return {
+    playAudio,
+    stopAudio,
+    stopCurrentPlayer,
+    isPlaybackActive: () => isPlayingRef.current || queueRef.current.length > 0,
+  };
 }
