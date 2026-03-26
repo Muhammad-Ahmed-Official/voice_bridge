@@ -402,7 +402,12 @@ export default function App() {
     // ── Voice Cloning status events ───────────────────────────────────────────
     const onCloneStarted = () => setCloneStatus('buffering');
     const onCloneReady   = (data: { voiceId: string }) => setCloneStatus('ready');
-    const onCloneFailed  = () => setCloneStatus('using-original');
+    const onCloneFailed = (data?: { reason?: string; message?: string }) => {
+      setCloneStatus('using-original');
+      if (data?.reason === 'VOICE_LIMIT_REACHED') {
+        showAlert('Voice Cloning', data.message || 'Voice limit reached. Please try later.');
+      }
+    };
 
     socket.on('clone-started', onCloneStarted);
     socket.on('clone-ready',   onCloneReady);

@@ -21,23 +21,26 @@ const CLONE_WINDOW_MS = 45_000; // collect 20 s of wall-clock audio
 const MIN_CHUNKS      = 3;      // need at least 3 segments for a usable sample
 
 
-export function initCloneBuffer(socketId, userId) {
+export function initCloneBuffer(socketId, userId, existingVoiceId = null) {
   cloneBuffers.delete(socketId);
 
   const limitReached = voiceLimitUsers.has(userId);
+  const hasExistingVoice = typeof existingVoiceId === 'string' && existingVoiceId.length > 0;
 
   cloneBuffers.set(socketId, {
     chunks:           [],
     mimeType:         'audio/webm',
     startTime:        null,   // set on first chunk
     userId,
-    status:           limitReached ? 'failed' : 'buffering',
-    voiceId:          null,
+    status:           hasExistingVoice ? 'ready' : (limitReached ? 'failed' : 'buffering'),
+    voiceId:          hasExistingVoice ? existingVoiceId : null,
     cloneTriggered:   false,   // guard: prevent duplicate performVoiceClone calls
     voiceLimitReached: limitReached,
   });
 
-  if (limitReached) {
+  if (hasExistingVoice) {
+    console.log(`[VoiceClone] Reusing stored voice for user=${userId} voice_id=${existingVoiceId}`);
+  } else if (limitReached) {
     console.warn(`[VoiceClone] User=${userId} hit voice limit previously — cloning disabled for this session`);
   } else {
     console.log(`[VoiceClone] Buffer initialised for user=${userId} socket=${socketId}`);
@@ -109,59 +112,23 @@ export async function performVoiceClone(socketId) {
   state.status = 'cloning';
 
   try {
-    await deleteOldClonedVoice(state.userId);
-
-    const ext        = state.mimeType.includes('m4a') ? 'm4a' : 'webm';
+    const ext = state.mimeType.includes('m4a') ? 'm4a' : 'webm';
     const totalBytes = state.chunks.reduce((a, b) => a + b.length, 0);
-    const combined   = Buffer.concat(state.chunks);
-    // ADD THIS CHECK:
+    const combined = Buffer.concat(state.chunks);
     if (combined.length < 50000) { // Approx 50KB minimum for a decent sample
       state.status = 'failed';
       throw new Error('[VoiceClone] Audio sample too small for quality cloning');
     }
-    const blob   = new Blob([combined], { type: state.mimeType });
-
-    const formData = new FormData();
-    formData.append('name',        `vc_${state.userId}_${Date.now()}`);
-    formData.append('description', `Auto-cloned for ${state.userId}`);
-    formData.append('remove_background_noise', 'true'); // <--- ADD THIS LINE
-    formData.append('files', blob, `voice_sample.${ext}`);
-
-    console.log(
-      `[VoiceClone] Uploading 1 concatenated file ` +
-      `(${state.chunks.length} segments, ~${(totalBytes / 1024).toFixed(1)} KB) ` +
-      `for user=${state.userId}`,
-    );
-
-    // ── POST to ElevenLabs Instant Voice Cloning endpoint ────────────────────
-    const response = await fetch('https://api.elevenlabs.io/v1/voices/add', {
-      method:  'POST',
-      headers: { 'xi-api-key': ELEVENLABS_API_KEY },
-      body:    formData,
+    const voiceName = `user_${state.userId}`;
+    const voiceId = await getOrCreateVoice(state.userId, {
+      name: voiceName,
+      mimeType: state.mimeType,
+      ext,
+      combined,
+      totalBytes,
     });
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '(no body)');
-      if (errText.includes('voice_limit_reached')) {
-        state.voiceLimitReached = true;
-        voiceLimitUsers.add(state.userId);
-      }
-      throw new Error(
-        `ElevenLabs /v1/voices/add HTTP ${response.status}: ${errText}`,
-      );
-    }
-
-    const data    = await response.json();
-    const voiceId = data.voice_id;
-    if (!voiceId) throw new Error('ElevenLabs returned no voice_id');
-
-    await User.findOneAndUpdate(
-      { userId: state.userId },
-      { $set: { voiceId } },
-      { returnDocument: 'after' },
-    );
-
-    state.status  = 'ready';
+    state.status = 'ready';
     state.voiceId = voiceId;
 
     console.log(`[VoiceClone] Success — user=${state.userId} voice_id=${voiceId}`);
@@ -169,6 +136,10 @@ export async function performVoiceClone(socketId) {
 
   } catch (err) {
     state.status = 'failed';
+    if (err?.message === 'VOICE_LIMIT_REACHED') {
+      state.voiceLimitReached = true;
+      voiceLimitUsers.add(state.userId);
+    }
     console.warn(`[VoiceClone] Failed for user=${state.userId}:`, err.message);
     throw err;
   }
@@ -207,31 +178,71 @@ export function clearCloneBuffer(socketId) {
   }
 }
 
-async function deleteOldClonedVoice(userId) {
-  if (!ELEVENLABS_API_KEY) return;
+async function getOrCreateVoice(userId, audioSample) {
+  if (!ELEVENLABS_API_KEY) throw new Error('Missing ELEVENLABS_API_KEY');
 
-  if (activeCallUsers.has(userId)) {
-    console.log(`[VoiceClone] Skipping voice deletion for ${userId} — active call in progress`);
-    return;
+  const user = await User.findOne({ userId }).lean();
+  if (!user) throw new Error(`User not found for voice clone: ${userId}`);
+
+  console.log('[VoiceClone] User ID:', user.userId);
+  console.log('[VoiceClone] Voice ID:', user.voiceId);
+
+  // Step 1: Reuse existing DB voice first.
+  if (user.voiceId) {
+    console.log('[VoiceClone] Using existing voice from DB:', user.voiceId);
+    return user.voiceId;
   }
 
-  try {
-    const user = await User.findOne({ userId }).lean();
-    const oldVoiceId = user?.voiceId;
-    if (!oldVoiceId) return;
+  // Step 2: Recover existing voice from ElevenLabs by deterministic name.
+  const voicesResponse = await fetch('https://api.elevenlabs.io/v1/voices', {
+    method: 'GET',
+    headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+  });
+  if (!voicesResponse.ok) {
+    const errText = await voicesResponse.text().catch(() => '(no body)');
+    throw new Error(`ElevenLabs /v1/voices HTTP ${voicesResponse.status}: ${errText}`);
+  }
 
-    const res = await fetch(
-      `https://api.elevenlabs.io/v1/voices/${oldVoiceId}`,
-      {
-        method:  'DELETE',
-        headers: { 'xi-api-key': ELEVENLABS_API_KEY },
-      },
-    );
+  const voicesData = await voicesResponse.json();
+  const voices = Array.isArray(voicesData?.voices) ? voicesData.voices : [];
+  const existingVoice = voices.find((v) => v?.name === audioSample.name);
+  if (existingVoice?.voice_id) {
+    await User.updateOne({ userId }, { $set: { voiceId: existingVoice.voice_id } });
+    console.log('[VoiceClone] Recovered existing voice from API:', existingVoice.voice_id);
+    return existingVoice.voice_id;
+  }
 
-    if (res.ok) {
-      console.log(`[VoiceClone] Deleted old voice ${oldVoiceId} for user=${userId}`);
+  // Step 3: Create only if no voice exists.
+  const blob = new Blob([audioSample.combined], { type: audioSample.mimeType });
+  const formData = new FormData();
+  formData.append('name', audioSample.name);
+  formData.append('description', `Auto-cloned for ${userId}`);
+  formData.append('remove_background_noise', 'true');
+  formData.append('files', blob, `voice_sample.${audioSample.ext}`);
+
+  console.log(
+    `[VoiceClone] Creating new voice ` +
+    `(${(audioSample.totalBytes / 1024).toFixed(1)} KB) for user=${userId}`,
+  );
+
+  const createResponse = await fetch('https://api.elevenlabs.io/v1/voices/add', {
+    method: 'POST',
+    headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+    body: formData,
+  });
+  if (!createResponse.ok) {
+    const errText = await createResponse.text().catch(() => '(no body)');
+    if (errText.includes('voice_limit_reached')) {
+      throw new Error('VOICE_LIMIT_REACHED');
     }
-  } catch (err) {
-    console.warn('[VoiceClone] Could not delete old voice (non-fatal):', err.message);
+    throw new Error(`ElevenLabs /v1/voices/add HTTP ${createResponse.status}: ${errText}`);
   }
+
+  const created = await createResponse.json();
+  const createdVoiceId = created?.voice_id;
+  if (!createdVoiceId) throw new Error('ElevenLabs returned no voice_id');
+
+  await User.updateOne({ userId }, { $set: { voiceId: createdVoiceId } });
+  console.log('[VoiceClone] Created new voice:', createdVoiceId);
+  return createdVoiceId;
 }

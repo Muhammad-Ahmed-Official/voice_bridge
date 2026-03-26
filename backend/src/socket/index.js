@@ -346,19 +346,43 @@ export function initSocket(httpServer) {
         console.log(`[VoiceClone] Cloning flags — ${callerId}: ${userA.voiceCloningEnabled} | ${socket.data.userId}: ${userB.voiceCloningEnabled}`);
 
         if (userA.voiceCloningEnabled) {
-          initCloneBuffer(callerSocketId, callerId);
-          io.to(callerSocketId).emit('clone-started', {
-            status: 'buffering',
-            message: 'Recording your voice for cloning…',
-          });
+          const existingVoiceA =
+            typeof userADoc?.voiceId === 'string' && userADoc.voiceId.length > 0
+              ? userADoc.voiceId
+              : null;
+          initCloneBuffer(callerSocketId, callerId, existingVoiceA);
+          if (existingVoiceA) {
+            io.to(callerSocketId).emit('clone-ready', {
+              status: 'ready',
+              voiceId: existingVoiceA,
+              message: 'Using your saved cloned voice.',
+            });
+          } else {
+            io.to(callerSocketId).emit('clone-started', {
+              status: 'buffering',
+              message: 'Recording your voice for cloning…',
+            });
+          }
         }
 
         if (userB.voiceCloningEnabled) {
-          initCloneBuffer(socket.id, socket.data.userId);
-          socket.emit('clone-started', {
-            status: 'buffering',
-            message: 'Recording your voice for cloning…',
-          });
+          const existingVoiceB =
+            typeof userBDoc?.voiceId === 'string' && userBDoc.voiceId.length > 0
+              ? userBDoc.voiceId
+              : null;
+          initCloneBuffer(socket.id, socket.data.userId, existingVoiceB);
+          if (existingVoiceB) {
+            socket.emit('clone-ready', {
+              status: 'ready',
+              voiceId: existingVoiceB,
+              message: 'Using your saved cloned voice.',
+            });
+          } else {
+            socket.emit('clone-started', {
+              status: 'buffering',
+              message: 'Recording your voice for cloning…',
+            });
+          }
         }
       } catch (cloneInitErr) {
         // Non-fatal — call still proceeds with default TTS
@@ -521,7 +545,7 @@ export function initSocket(httpServer) {
               .catch((err) => {
                 if (err.message.includes('already in progress')) return;
 
-                const isLimitError = err.message.includes('voice_limit_reached');
+                const isLimitError = err.message.includes('VOICE_LIMIT_REACHED');
                 if (isLimitError) {
                   console.warn(`[VoiceClone] Voice limit reached for user=${socket.data.userId}`);
                 } else {
@@ -532,7 +556,13 @@ export function initSocket(httpServer) {
                     }
                   }, 20_000);
                 }
-                socket.emit('clone-failed', { status: 'failed', message: 'Using default voice for now' });
+                socket.emit('clone-failed', {
+                  status: 'failed',
+                  reason: isLimitError ? 'VOICE_LIMIT_REACHED' : 'CLONE_FAILED',
+                  message: isLimitError
+                    ? 'Voice limit reached. Please try later.'
+                    : 'Voice cloning failed. Retrying soon.',
+                });
               });
           }
         }

@@ -21,7 +21,7 @@ const userSchema = new mongoose.Schema(
     // Optional: specific ElevenLabs voice id per user. If empty, default voice is used.
     voiceId: {
       type: String,
-      default: "",
+      default: null,
     },
   },
   { timestamps: true },
