@@ -112,12 +112,9 @@ export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId
 
   if (speakerUserId) {
     try {
-      // Guard: if listener has cloning enabled, we are in CASE 2 or CASE 3 — never clone.
-      if (listenerCloningEnabled) {
-        console.log(`[TTS Router] GOOGLE TTS (listener cloning gate) — speaker=${speakerUserId} locale=${locale}`);
-        return synthesizeSpeech(text, locale);
-      }
-
+      // No listener-based gate here. Whether the listener has cloning on is irrelevant —
+      // cloning is the SPEAKER's identity and is applied to their outgoing voice only.
+      // CASE 3 (both ON): each hears the other's clone, decided upstream in resolveAudioStrategy.
       const user = await User.findOne({ userId: speakerUserId }).lean();
       const cloningEnabled = !!user?.voiceCloningEnabled;
 

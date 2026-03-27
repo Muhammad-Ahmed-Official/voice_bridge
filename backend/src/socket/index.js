@@ -96,27 +96,32 @@ function resolveAudioStrategy(room, senderSocketId) {
   const sameLanguage = speakLang === hearLang;
 
   // ── Two-user cloning decision matrix ─────────────────────────────────────
-  // Voice cloning represents the SPEAKER'S identity, gated by mutual consent.
+  // Voice cloning represents the SPEAKER'S identity.
+  // The deciding factor is whether the SPEAKER has opted in — not the listener.
   //
-  // CASE 1: Speaker ON,  Listener OFF → cloned voice  (speaker's identity expressed)
-  // CASE 2: Speaker OFF, Listener ON  → Google TTS    (speaker never opted in)
-  // CASE 3: Both ON                   → Google TTS    (mutual opt-in cancels; neither overrides)
+  // CASE 1: Speaker ON,  Listener OFF → speaker's cloned voice
+  // CASE 2: Speaker OFF, Listener ON  → Google TTS (speaker never opted in)
+  // CASE 3: Both ON                   → EACH hears the OTHER's cloned voice
+  //                                     (A speaks → B hears A's clone; B speaks → A hears B's clone)
   // CASE 4: Both OFF                  → Google TTS
   //
-  // 'cloned-tts' strategy is ONLY reachable in CASE 1, when voice is ready and limit not hit.
+  // 'cloned-tts' is reachable in CASE 1 and CASE 3 when voice is ready and limit not hit.
   let cloningCase;
   if      ( senderCloningEnabled && !receiverCloningEnabled) cloningCase = 'CASE_1';
   else if (!senderCloningEnabled &&  receiverCloningEnabled) cloningCase = 'CASE_2';
   else if ( senderCloningEnabled &&  receiverCloningEnabled) cloningCase = 'CASE_3';
   else                                                        cloningCase = 'CASE_4';
 
-  const useClonedVoice = cloningCase === 'CASE_1' && !limitReached && !!cloneVoiceId;
+  // Use cloned voice whenever the SENDER has cloning on and the voice is ready.
+  // CASE 3 is intentionally the same as CASE 1 — each user's clone is used for
+  // their own outgoing speech, so neither user ever hears their own cloned voice.
+  const useClonedVoice = senderCloningEnabled && !limitReached && !!cloneVoiceId;
 
   let strategy;
   if (useClonedVoice) {
     strategy = 'cloned-tts';
-  } else if (cloningCase === 'CASE_1') {
-    // CASE 1 (sender ON, receiver OFF) but clone not yet ready or failed:
+  } else if (cloningCase === 'CASE_1' || cloningCase === 'CASE_3') {
+    // Sender has cloning ON but clone not yet ready or failed:
     // passthrough raw audio + text captions only — never Google TTS as a
     // substitute for the cloned voice the sender opted into.
     strategy = 'passthrough';
@@ -158,11 +163,17 @@ function resolveAudioStrategy(room, senderSocketId) {
   };
 }
 
-function bufferAndTranslate( io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, captionOnly = false, senderCloningEnabled = false, pipelineStrategy = 'tts', receiverCloningEnabled = false ) {
+function bufferAndTranslate( io, socket, roomId, text, speakLang, hearLang, receiver, ttsLocale, captionOnly = false, senderCloningEnabled = false, pipelineStrategy = 'tts', receiverCloningEnabled = false, audioChunk = null ) {
   const key = `${roomId}_${socket.id}`;
-  const buffer = textBuffers.get(key) || { text: '', timeout: null };
+  const buffer = textBuffers.get(key) || { text: '', timeout: null, audioChunks: [] };
+  if (!buffer.audioChunks) buffer.audioChunks = []; // migrate buffers created before this field existed
   if (buffer.timeout) clearTimeout(buffer.timeout);
   buffer.text = buffer.text ? `${buffer.text} ${text}` : text;
+  // Accumulate raw audio chunks so we can fall back to passthrough if cloned TTS fails.
+  // Only needed for cloned-tts — other strategies either use passthrough directly or Google TTS.
+  if (audioChunk && pipelineStrategy === 'cloned-tts') {
+    buffer.audioChunks.push(audioChunk);
+  }
   buffer.timeout = setTimeout(async () => {
     const fullText = buffer.text.trim();
     textBuffers.delete(key);
@@ -221,20 +232,39 @@ function bufferAndTranslate( io, socket, roomId, text, speakLang, hearLang, rece
         }, 60_000);
       }
 
-      // When the cloned-voice TTS call returned null (ElevenLabs failed at synthesis
-      // time), do not deliver any audio to the receiver — send captionOnly instead.
       const cloneTtsFailed = pipelineStrategy === 'cloned-tts' && !ttsAudio;
-      io.to(receiver.socketId).emit('translated-text', {
-        text:        result.text,
-        audioBase64: ttsAudio || null,
-        fromUserId:  socket.data.userId,
-        captionOnly: cloneTtsFailed,
-      });
+
       if (cloneTtsFailed) {
+        // ElevenLabs failed — fall back to raw audio passthrough so the receiver
+        // always hears something (original voice) rather than silence.
+        // The buffered audioChunks are all the raw segments accumulated during
+        // this 1.5 s text-buffer window.
+        const chunks = buffer.audioChunks || [];
+        console.warn(
+          `[Pipeline] Cloned TTS failed for ${socket.data.userId}` +
+          ` — falling back to passthrough (${chunks.length} chunk(s))`,
+        );
+        for (const chunk of chunks) {
+          io.to(receiver.socketId).emit('audio-passthrough', chunk);
+        }
+        // Also deliver the translated text as a caption
+        io.to(receiver.socketId).emit('translated-text', {
+          text:        result.text,
+          audioBase64: null,
+          fromUserId:  socket.data.userId,
+          captionOnly: true,
+        });
         socket.emit('clone-failed', {
           status:  'failed',
           reason:  'CLONE_TTS_FAILED',
-          message: 'Cloned voice unavailable — receiver sees text only.',
+          message: 'Cloned voice unavailable — falling back to your original voice.',
+        });
+      } else {
+        io.to(receiver.socketId).emit('translated-text', {
+          text:        result.text,
+          audioBase64: ttsAudio || null,
+          fromUserId:  socket.data.userId,
+          captionOnly: false,
         });
       }
       socket.emit('speech-transcript', { text: fullText });
@@ -407,11 +437,11 @@ export function initSocket(httpServer) {
 
         console.log(`[VoiceClone] Cloning flags — ${callerId}: ${userA.voiceCloningEnabled} | ${socket.data.userId}: ${userB.voiceCloningEnabled}`);
 
-        // CASE 1 only: init cloning for a user only when the OTHER user does NOT have cloning ON.
-        // If both have cloning ON (CASE 3), canClone is false and buffering is wasted work —
-        // so we must not emit clone-started either, as it would be a false promise to the user.
-        const userACanClone = userA.voiceCloningEnabled && !userB.voiceCloningEnabled;
-        const userBCanClone = userB.voiceCloningEnabled && !userA.voiceCloningEnabled;
+        // Init a clone buffer for every user who has cloning ON, regardless of what the
+        // other user has chosen. In CASE 3 (both ON) both buffers are needed so each
+        // user's voice can be cloned for the other to hear.
+        const userACanClone = userA.voiceCloningEnabled;
+        const userBCanClone = userB.voiceCloningEnabled;
 
         if (userACanClone) {
           const existingVoiceA =
@@ -605,7 +635,9 @@ export function initSocket(httpServer) {
       // Strategy jo bhi ho, agar cloning ON hai aur voice ready nahi, to buffer karo
       // Only buffer for cloning in CASE 1 (speaker ON, listener OFF).
       // CASE 3 (both ON) resolves to Google TTS, so buffering is wasted work.
-      const canClone = senderCloningEnabled && !receiverCloningEnabled && speakLang !== hearLang && !cloneVoiceId && !isVoiceLimitReached(socket.id);
+      // Buffer audio for cloning whenever the SENDER has cloning ON and voice isn't ready yet.
+      // Removed !receiverCloningEnabled — CASE 3 (both ON) must also build the sender's clone.
+      const canClone = senderCloningEnabled && speakLang !== hearLang && !cloneVoiceId && !isVoiceLimitReached(socket.id);
 
       if (canClone) {
         const cloneState = getCloneState(socket.id);
@@ -658,12 +690,12 @@ export function initSocket(httpServer) {
               const text = await transcribeAudio(audioBase64, sttLocale, mimeType);
               if (!text.trim()) return;
               socket.emit('speech-transcript', { text });
-              // Caption-only when languages match OR when CASE 1 is using passthrough
+              // Caption-only when languages match OR when CASE 1/3 is using passthrough
               // (clone pending/failed). Raw audio is already forwarded above; we must
               // not also deliver a Google TTS render of the same utterance.
               const captionOnlyPassthrough =
                 strategy === 'passthrough' &&
-                (speakLang === hearLang || cloningCase === 'CASE_1');
+                (speakLang === hearLang || cloningCase === 'CASE_1' || cloningCase === 'CASE_3');
               bufferAndTranslate(
                 io,
                 socket,
@@ -725,6 +757,9 @@ export function initSocket(httpServer) {
           senderCloningEnabled,
           strategy,
           receiverCloningEnabled,
+          // For cloned-tts, store the raw chunk so bufferAndTranslate can fall
+          // back to audio-passthrough if ElevenLabs TTS synthesis fails.
+          strategy === 'cloned-tts' ? { audioBase64, mimeType } : null,
         );
 
       } catch (err) {
