@@ -100,11 +100,14 @@ export async function getTtsForUser({ text, locale, speakerUserId, clonedVoiceId
       }
     } catch (err) {
       console.warn(
-        `[TTS Router] ⚠️  ElevenLabs cloned voice failed (voice_id=${clonedVoiceId}), ` +
-        `falling back to Google TTS: ${err.message}`,
+        `[TTS Router] ⚠️  ElevenLabs cloned voice failed (voice_id=${clonedVoiceId}): ${err.message}` +
+        ` — returning null (no fallback TTS when clone is active)`,
       );
     }
-    return synthesizeSpeech(text, locale);
+    // Do NOT fall back to Google TTS when a cloned voice was active.
+    // Caller will send captionOnly:true so the receiver sees text but hears nothing
+    // rather than a generic voice the speaker never consented to.
+    return null;
   }
 
   if (speakerUserId) {

@@ -1018,7 +1018,9 @@ export default function App() {
                           voiceCloningEnabled: next,
                         });
                       } catch (err: any) {
-                        console.error(
+                        // Non-fatal: local UI state already toggled above.
+                        // A network or server error must never crash the app.
+                        console.warn(
                           '[Preferences] Failed to update voice cloning flag:',
                           err.message || err,
                         );

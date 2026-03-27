@@ -106,7 +106,7 @@ export const updatePreferences = async (req, res) => {
     const user = await User.findOneAndUpdate(
       { userId },
       { $set: update },
-      { new: true },
+      { returnDocument: 'after' }
     );
 
     if (!user) {
