@@ -305,6 +305,13 @@ export function initSocket(httpServer) {
 
   io.on('connection', (socket) => {
     console.log(`[socket] connected: ${socket.id}`);
+
+    // Ensures clients can fetch current online list even if they missed
+    // the initial `register` broadcast during reload.
+    socket.on('requestOnlineUsers', () => {
+      socket.emit('getOnlineUser', getOnlineUserIds());
+    });
+
     socket.on('register', ({ userId, odId }) => {
       socket.data.userId = userId;
       socket.data.odId = odId;

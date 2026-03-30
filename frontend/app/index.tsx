@@ -477,7 +477,7 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
               const isMe = m.sender === user?._id;
               const isMenuOpen = activeMenuId === m.customId;
               return (
-                <View key={m.customId} style={{ marginBottom: 15, width: '100%', alignItems: isMe ? 'flex-start' : 'flex-end' }}>
+                <View key={m.customId} style={{ marginBottom: 15, width: '100%', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
                   <TouchableOpacity activeOpacity={0.8} onPress={() => setActiveMenuId(isMenuOpen ? null : m.customId)} style={[styles.chatBubble, isMe ? styles.bubbleMe : styles.bubbleThem, isMenuOpen && { borderColor: THEME.primary, borderWidth: 1 }]}>
                     <Text style={{ color: '#fff', fontSize: 16 }}>{m.message}</Text>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>

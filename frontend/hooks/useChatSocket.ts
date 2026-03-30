@@ -92,6 +92,13 @@ export function useChatSocket({
     socket.on('getOnlineUser', handleOnlineUsers);
     socket.on('userMsg', handleUserMsg);
 
+    // Initial online snapshot (prevents "offline" until re-join after reload).
+    const requestOnlineUsers = () => {
+      socket.emit('requestOnlineUsers');
+    };
+    if (socket.connected) requestOnlineUsers();
+    else socket.once('connect', requestOnlineUsers);
+
     return () => {
       socket.off('newMessage', handleNewMessage);
       socket.off('deleteMsg', handleDeleteMsg);
