@@ -285,23 +285,51 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
   );
 
   const handleTranslate = (textToTranslate: string, lang: string, isInput: boolean = false) => {
-    const mockTrans: any = {
-      Hello: { UR: 'اسلام علیکم', EN: 'Hello', AR: 'مرحبا' },
-      'How are you?': { UR: 'آپ کیسے ہیں؟', EN: 'How are you?', AR: 'كيف حالك؟' },
-    };
-    const translated = mockTrans[textToTranslate]?.[lang] || `[${lang}] ${textToTranslate}`;
-    if (isInput) {
-      setInputText(translated);
-      setShowInputTranslate(false);
-    } else {
-      setMessages((prev) => {
-        if (!prev.has(activeMenuId!)) return prev;
-        const updated = new Map(prev);
-        updated.set(activeMenuId!, { ...updated.get(activeMenuId!)!, message: translated });
-        return updated;
-      });
-      setActiveMenuId(null);
-    }
+    if (!socket || !textToTranslate?.trim()) return;
+    const text = textToTranslate.trim();
+    const toLang = lang;
+
+    // Use backend google translate (real-time). `fromLang=auto` so it works
+    // regardless of what language the message currently is.
+    socket.emit(
+      'translateChatMessage',
+      { text, toLang, fromLang: 'auto' },
+      (res: { success?: boolean; text?: string } | undefined) => {
+        const finalText = res?.text ?? text;
+
+        if (isInput) {
+          // Image2 scenario: translate input then send only that message.
+          if (selectedChat) {
+            socketSend(finalText, selectedChat.partnerId, user?.userId ?? '');
+            setInbox((prev) =>
+              prev.map((item) =>
+                item.partnerId === selectedChat.partnerId
+                  ? { ...item, lastMessage: finalText, lastTimestamp: new Date().toISOString() }
+                  : item,
+              ),
+            );
+            setInputText('');
+            setShowInputTranslate(false);
+            setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+          } else {
+            setInputText(finalText);
+            setShowInputTranslate(false);
+          }
+          return;
+        }
+
+        // Image1 scenario: translate only the message whose READ INTO menu open hai.
+        const menuId = activeMenuId;
+        if (!menuId) return;
+        setMessages((prev) => {
+          if (!prev.has(menuId)) return prev;
+          const updated = new Map(prev);
+          updated.set(menuId, { ...updated.get(menuId)!, message: finalText });
+          return updated;
+        });
+        setActiveMenuId(null);
+      },
+    );
   };
 
   const openChat = async (chat: Conversation) => {

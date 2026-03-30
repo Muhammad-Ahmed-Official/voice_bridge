@@ -312,6 +312,22 @@ export function initSocket(httpServer) {
       socket.emit('getOnlineUser', getOnlineUserIds());
     });
 
+    // ── Bridge Messenger: realtime chat translation ─────────────────────────
+    // Frontend jab "READ INTO" ya input translation (UR/EN/AR) select karta hai,
+    // yahan server Google translate use karke text return karta hai.
+    socket.on('translateChatMessage', async (data, callback) => {
+      try {
+        const { text, toLang, fromLang = 'auto' } = data || {};
+        if (!text || !toLang) {
+          return callback?.({ success: false, text });
+        }
+        const result = await translateText(text, fromLang, toLang);
+        return callback?.({ success: !!result?.success, text: result?.text ?? text });
+      } catch (err) {
+        return callback?.({ success: false, text: data?.text });
+      }
+    });
+
     socket.on('register', ({ userId, odId }) => {
       socket.data.userId = userId;
       socket.data.odId = odId;
