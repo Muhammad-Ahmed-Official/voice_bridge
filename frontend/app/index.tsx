@@ -26,6 +26,7 @@ import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { historyApi } from '@/api/history';
 import { updatePreferences } from '@/api/user';
 import { useRouter } from 'expo-router';
+import { translateChatText, type ChatLang } from '@/services/chatTranslation';
 
 const { width } = Dimensions.get('window');
 
@@ -232,6 +233,12 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
   const [newUserId, setNewUserId] = useState('');
   const [newBridgeLoading, setNewBridgeLoading] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [selectedSendLang, setSelectedSendLang] = useState<ChatLang | null>(null);
+  const [isTranslatingBeforeSend, setIsTranslatingBeforeSend] = useState(false);
+  const [translatingMessageId, setTranslatingMessageId] = useState<string | null>(null);
+  const [messageOriginalText, setMessageOriginalText] = useState<Map<string, string>>(new Map());
+
+  const translationCacheRef = useRef<Map<string, string>>(new Map());
 
   const scrollRef = useRef<any>(null);
   const selectedChatRef = useRef<Conversation | null>(null);
@@ -284,52 +291,57 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
     (a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime(),
   );
 
-  const handleTranslate = (textToTranslate: string, lang: string, isInput: boolean = false) => {
-    if (!socket || !textToTranslate?.trim()) return;
-    const text = textToTranslate.trim();
-    const toLang = lang;
+  const updateMessageText = (messageId: string, text: string) => {
+    setMessages((prev) => {
+      if (!prev.has(messageId)) return prev;
+      const updated = new Map(prev);
+      updated.set(messageId, { ...updated.get(messageId)!, message: text });
+      return updated;
+    });
+  };
 
-    // Use backend google translate (real-time). `fromLang=auto` so it works
-    // regardless of what language the message currently is.
-    socket.emit(
-      'translateChatMessage',
-      { text, toLang, fromLang: 'auto' },
-      (res: { success?: boolean; text?: string } | undefined) => {
-        const finalText = res?.text ?? text;
+  const translateExistingMessage = async (messageId: string, currentText: string, lang: ChatLang) => {
+    const sourceText = (messageOriginalText.get(messageId) ?? currentText).trim();
+    if (!sourceText) return;
+    const cacheKey = `msg:${sourceText}:${lang}`;
+    const cached = translationCacheRef.current.get(cacheKey);
+    if (cached) {
+      updateMessageText(messageId, cached);
+      setActiveMenuId(null);
+      return;
+    }
 
-        if (isInput) {
-          // Image2 scenario: translate input then send only that message.
-          if (selectedChat) {
-            socketSend(finalText, selectedChat.partnerId, user?.userId ?? '');
-            setInbox((prev) =>
-              prev.map((item) =>
-                item.partnerId === selectedChat.partnerId
-                  ? { ...item, lastMessage: finalText, lastTimestamp: new Date().toISOString() }
-                  : item,
-              ),
-            );
-            setInputText('');
-            setShowInputTranslate(false);
-            setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
-          } else {
-            setInputText(finalText);
-            setShowInputTranslate(false);
-          }
-          return;
-        }
+    setTranslatingMessageId(messageId);
+    try {
+      const translated = await translateChatText(socket, sourceText, lang, 'auto');
+      if (!translated.success) {
+        showAlert('Translation Error', 'Message translation failed. Please try again.');
+        return;
+      }
+      translationCacheRef.current.set(cacheKey, translated.text);
+      setMessageOriginalText((prev) => {
+        if (prev.has(messageId)) return prev;
+        const updated = new Map(prev);
+        updated.set(messageId, sourceText);
+        return updated;
+      });
+      updateMessageText(messageId, translated.text);
+      setActiveMenuId(null);
+    } finally {
+      setTranslatingMessageId(null);
+    }
+  };
 
-        // Image1 scenario: translate only the message whose READ INTO menu open hai.
-        const menuId = activeMenuId;
-        if (!menuId) return;
-        setMessages((prev) => {
-          if (!prev.has(menuId)) return prev;
-          const updated = new Map(prev);
-          updated.set(menuId, { ...updated.get(menuId)!, message: finalText });
-          return updated;
-        });
-        setActiveMenuId(null);
-      },
-    );
+  const restoreOriginalMessage = (messageId: string) => {
+    const original = messageOriginalText.get(messageId);
+    if (!original) return;
+    updateMessageText(messageId, original);
+    setActiveMenuId(null);
+  };
+
+  const chooseSendLanguage = (lang: ChatLang) => {
+    setSelectedSendLang(lang);
+    setShowInputTranslate(false);
   };
 
   const openChat = async (chat: Conversation) => {
@@ -399,23 +411,46 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
     }
   };
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!inputText.trim() || !selectedChat) return;
     if (editingId) {
       editMessage(editingId, selectedChat.partnerId, inputText);
       setEditingId(null);
     } else {
-      socketSend(inputText, selectedChat.partnerId, user?.userId ?? '');
+      let finalOutgoingText = inputText.trim();
+      if (selectedSendLang) {
+        const cacheKey = `send:${finalOutgoingText}:${selectedSendLang}`;
+        const cached = translationCacheRef.current.get(cacheKey);
+        if (cached) {
+          finalOutgoingText = cached;
+        } else {
+          setIsTranslatingBeforeSend(true);
+          try {
+            const translated = await translateChatText(socket, finalOutgoingText, selectedSendLang, 'auto');
+            if (translated.success) {
+              finalOutgoingText = translated.text;
+              translationCacheRef.current.set(cacheKey, translated.text);
+            } else {
+              showAlert('Translation Error', 'Sending original message because translation failed.');
+            }
+          } finally {
+            setIsTranslatingBeforeSend(false);
+          }
+        }
+      }
+
+      socketSend(finalOutgoingText, selectedChat.partnerId, user?.userId ?? '');
       setInbox((prev) =>
         prev.map((item) =>
           item.partnerId === selectedChat.partnerId
-            ? { ...item, lastMessage: inputText, lastTimestamp: new Date().toISOString() }
+            ? { ...item, lastMessage: finalOutgoingText, lastTimestamp: new Date().toISOString() }
             : item,
         ),
       );
     }
     setInputText('');
     setShowInputTranslate(false);
+    setSelectedSendLang(null);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
@@ -528,13 +563,26 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
                   {isMenuOpen && (
                     <View style={{ backgroundColor: '#1E293B', borderRadius: 12, padding: 10, marginTop: 5, width: 220, borderWidth: 1, borderColor: THEME.primary, zIndex: 50 }}>
                       <Text style={{ color: '#94A3B8', fontSize: 10, marginBottom: 8, fontWeight: '700' }}>READ INTO:</Text>
+                      {translatingMessageId === m.customId && (
+                        <ActivityIndicator color={THEME.primary} style={{ marginBottom: 8 }} />
+                      )}
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 5 }}>
                         {['UR', 'EN', 'AR'].map((l) => (
-                          <TouchableOpacity key={l} onPress={() => handleTranslate(m.message, l)} style={{ flex: 1, backgroundColor: '#0F172A', padding: 8, borderRadius: 8, alignItems: 'center' }}>
+                          <TouchableOpacity
+                            key={l}
+                            onPress={() => translateExistingMessage(m.customId, m.message, l as ChatLang)}
+                            disabled={translatingMessageId === m.customId}
+                            style={{ flex: 1, backgroundColor: '#0F172A', padding: 8, borderRadius: 8, alignItems: 'center', opacity: translatingMessageId === m.customId ? 0.6 : 1 }}
+                          >
                             <Text style={{ color: '#fff', fontSize: 11 }}>{l}</Text>
                           </TouchableOpacity>
                         ))}
                       </View>
+                      {messageOriginalText.has(m.customId) && (
+                        <TouchableOpacity onPress={() => restoreOriginalMessage(m.customId)} style={{ marginTop: 8, alignSelf: 'center' }}>
+                          <Text style={{ color: THEME.primary, fontSize: 11, fontWeight: '700' }}>Show Original</Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   )}
                 </View>
@@ -545,7 +593,17 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
           {showInputTranslate && (
             <View style={{ position: 'absolute', bottom: 85, left: 20, backgroundColor: THEME.surface, padding: 12, borderRadius: 15, flexDirection: 'row', gap: 10, borderWidth: 1, borderColor: THEME.primary, zIndex: 1000 }}>
               {['UR', 'EN', 'AR'].map((l) => (
-                <TouchableOpacity key={l} onPress={() => handleTranslate(inputText, l, true)} style={{ padding: 10, backgroundColor: THEME.background, borderRadius: 10, minWidth: 45, alignItems: 'center' }}>
+                <TouchableOpacity
+                  key={l}
+                  onPress={() => chooseSendLanguage(l as ChatLang)}
+                  style={{
+                    padding: 10,
+                    backgroundColor: selectedSendLang === l ? THEME.primary : THEME.background,
+                    borderRadius: 10,
+                    minWidth: 45,
+                    alignItems: 'center',
+                  }}
+                >
                   <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>{l}</Text>
                 </TouchableOpacity>
               ))}
@@ -570,9 +628,14 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
                 </TouchableOpacity>
               )}
             </View>
-            <TouchableOpacity onPress={handleSend}>
+            {!!selectedSendLang && (
+              <Text style={{ color: THEME.primary, fontSize: 10, fontWeight: '700' }}>
+                {selectedSendLang}
+              </Text>
+            )}
+            <TouchableOpacity onPress={handleSend} disabled={isTranslatingBeforeSend}>
               <LinearGradient colors={[THEME.primary, THEME.secondary]} style={{ width: 45, height: 45, borderRadius: 22.5, justifyContent: 'center', alignItems: 'center' }}>
-                <Send size={20} color="#fff" />
+                {isTranslatingBeforeSend ? <ActivityIndicator color="#fff" /> : <Send size={20} color="#fff" />}
               </LinearGradient>
             </TouchableOpacity>
           </View>

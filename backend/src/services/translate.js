@@ -77,12 +77,25 @@ export async function translateText(text, fromCode, toCode) {
     return { text, success: true };
   }
 
-  const from = LANG_MAP[fromCode] ?? fromCode.toLowerCase();
-  const to = LANG_MAP[toCode] ?? toCode.toLowerCase();
+  const normalizedFrom = (fromCode ?? '').toString().trim();
+  const normalizedTo = (toCode ?? '').toString().trim();
+
+  const from =
+    normalizedFrom && normalizedFrom.toLowerCase() !== 'auto'
+      ? (LANG_MAP[normalizedFrom] ?? normalizedFrom.toLowerCase())
+      : null;
+  const to = LANG_MAP[normalizedTo] ?? normalizedTo.toLowerCase();
+
+  if (!to) {
+    console.error('[Translate] Missing/invalid target language:', toCode);
+    return { text, success: false };
+  }
 
   try {
     const client = getTranslateClient();
-    const [translation] = await client.translate(text, { from, to });
+    // Google Translate auto-detect works best by omitting `from` entirely.
+    const options = from ? { from, to } : { to };
+    const [translation] = await client.translate(text, options);
     
     console.log(`[Translate] "${text}" (${fromCode}) → "${translation}" (${toCode})`);
     return { text: translation, success: true };
