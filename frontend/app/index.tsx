@@ -320,12 +320,14 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
     } catch {
       setMessages(new Map());
     }
-    joinRoom(chat.partnerId);
+    // Realtime events backend `message/delete/edit/userMsg` ke liye `receiver` ko room name ki tarah emit karta hai,
+    // jahan `receiver` Mongo `_id` hota hai. Isliye har client ko apne current `_id` room me join hona chahiye.
+    if (user?._id) joinRoom(user._id);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 150);
   };
 
   const closeChat = () => {
-    if (selectedChat) leaveRoom(selectedChat.partnerId);
+    if (user?._id) leaveRoom(user._id);
     setSelectedChat(null);
     setMessages(new Map());
     setEditingId(null);
@@ -356,7 +358,7 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
         lastMessage: '',
         lastTimestamp: new Date().toISOString(),
         unreadCount: 0,
-        online: onlineUsers.includes(found._id),
+        online: onlineUsers.includes(found.userId),
       };
       setInbox((prev) => [newEntry, ...prev]);
       setShowNewChatModal(false);
@@ -393,6 +395,13 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
     (a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime(),
   );
 
+  // Always keep latest messages visible at the bottom while chat is open.
+  useEffect(() => {
+    if (!selectedChat) return;
+    // RN ScrollView ko content change hone par end tak scroll karna zaroori hota hai.
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+  }, [sortedMessages.length, selectedChat?.partnerId]);
+
   // --- RENDERING LOGIC ---
   return (
     <SafeAreaView style={styles.darkPage}>
@@ -421,12 +430,14 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
             ) : (
               sortedInbox.map((chat) => {
                 const hasUnread = chat.unreadCount > 0;
-                const isOnline = onlineUsers.includes(chat.partnerId);
+                // Backend online ids `register` ke `userId` format me hotay hain (custom login id),
+                // jabke `partnerId` Mongo `_id` hota hai. Isliye online check `partnerName` par karein.
+                const isOnline = onlineUsers.includes(chat.partnerName);
                 return (
                   <TouchableOpacity key={chat.partnerId} style={[styles.chatItem, hasUnread && { backgroundColor: 'rgba(6, 182, 212, 0.1)', borderColor: THEME.primary, borderWidth: 1.5 }]} onPress={() => openChat(chat)}>
                     <View>
                       <View style={styles.avatarCircle}><Text style={{ color: '#fff', fontSize: 18, fontWeight: '800' }}>{chat.partnerName[0]?.toUpperCase()}</Text></View>
-                      {isOnline && <View style={styles.onlineDot} />}
+                      {isOnline ? <View style={styles.onlineDot} /> : <View style={styles.offlineDot} />}
                     </View>
                     <View style={{ flex: 1, marginLeft: 15 }}>
                       <Text style={{ fontWeight: '700', color: hasUnread ? THEME.primary : '#fff', fontSize: 16 }}>{chat.partnerName}</Text>
@@ -453,7 +464,7 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
               <Text style={styles.navTitle}>{selectedChat.partnerName}</Text>
               {isPartnerTyping
                 ? <Text style={{ color: THEME.primary, fontSize: 10, fontWeight: '700' }}>● typing...</Text>
-                : onlineUsers.includes(selectedChat.partnerId)
+                : onlineUsers.includes(selectedChat.partnerName)
                   ? <Text style={{ color: THEME.success, fontSize: 10, fontWeight: '700' }}>● ONLINE</Text>
                   : <Text style={{ color: THEME.textMuted, fontSize: 10, fontWeight: '700' }}>● OFFLINE</Text>
               }
@@ -466,7 +477,7 @@ const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
               const isMe = m.sender === user?._id;
               const isMenuOpen = activeMenuId === m.customId;
               return (
-                <View key={m.customId} style={{ marginBottom: 15, width: '100%', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
+                <View key={m.customId} style={{ marginBottom: 15, width: '100%', alignItems: isMe ? 'flex-start' : 'flex-end' }}>
                   <TouchableOpacity activeOpacity={0.8} onPress={() => setActiveMenuId(isMenuOpen ? null : m.customId)} style={[styles.chatBubble, isMe ? styles.bubbleMe : styles.bubbleThem, isMenuOpen && { borderColor: THEME.primary, borderWidth: 1 }]}>
                     <Text style={{ color: '#fff', fontSize: 16 }}>{m.message}</Text>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
@@ -1771,8 +1782,8 @@ const styles = StyleSheet.create({
   pulseContainer: { marginBottom: 20, padding: 10, borderRadius: 100, backgroundColor: 'rgba(6, 182, 212, 0.1)' },
   chatBubbleWrap: { marginBottom: 15, width: '100%' },
   chatBubble: { maxWidth: '80%', padding: 12, borderRadius: 20 },
-  bubbleMe: { backgroundColor: THEME.primary, borderBottomRightRadius: 4 },
-  bubbleThem: { backgroundColor: THEME.surface, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: THEME.border },
+  bubbleMe: { backgroundColor: THEME.primary, borderBottomLeftRadius: 4 },
+  bubbleThem: { backgroundColor: THEME.surface, borderBottomRightRadius: 4, borderWidth: 1, borderColor: THEME.border },
   bubbleText: { color: '#fff', fontSize: 15 },
   bubbleFooter: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
   bubbleTime: { color: 'rgba(255,255,255,0.5)', fontSize: 9 },
@@ -1867,6 +1878,17 @@ onlineDot: {
   borderWidth: 2,
   borderColor: '#0F1219',
 },
+  offlineDot: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#64748B',
+    borderWidth: 2,
+    borderColor: '#0F1219',
+  },
 unreadBadge: {
   width: 10,
   height: 10,

@@ -42,6 +42,9 @@ export function useChatSocket({
 
     const handleNewMessage = (data: ChatMessage) => {
       if (data?.receiver !== currentUserIdRef.current) return;
+      // Sirf active partner ke messages show karein.
+      // (Sender side optimistic update use karta hai; `newMessage` events receiver side par aate hain.)
+      if (activePartnerIdRef.current && data?.sender !== activePartnerIdRef.current) return;
       setMessages((prev) => {
         const updated = new Map(prev);
         updated.set(data.customId, data);

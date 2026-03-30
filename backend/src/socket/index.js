@@ -1150,7 +1150,17 @@ export function initSocket(httpServer) {
 
       const receiverSockets = await io.in(receiver).fetchSockets();
       const isReceiverInRoom = receiverSockets.length > 0;
-      const payload = { sender, receiver, message, customId, userName, isReceiverInRoom };
+      const payload = {
+        sender,
+        receiver,
+        message,
+        customId,
+        userName,
+        isReceiverInRoom,
+        // UI me time show karne ke liye receiver-side ko bhi timestamp chahiye.
+        // Mongoose schema me timestamps: true hai, lekin realtime emit me createdAt include nahi tha.
+        createdAt: new Date().toISOString(),
+      };
 
       io.to(receiver).emit('newMessage', payload);
       try {
