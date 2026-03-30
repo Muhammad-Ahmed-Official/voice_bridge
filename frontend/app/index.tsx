@@ -1,8 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { 
+import React, { useState, useEffect, useRef } from 'react';
+import {
  MessageSquare, Plus,
-  Send, MoreVertical, Edit2, Trash2, Reply 
+  Send, MoreVertical, Edit2, Trash2, Reply
 } from 'lucide-react-native';
+import { useChatSocket } from '@/hooks/useChatSocket';
+import { chatApi } from '@/api/chat';
+import type { Conversation } from '@/types/chat';
 import {
   StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView,
   StatusBar, ActivityIndicator, Dimensions, Alert, Platform
@@ -218,95 +221,191 @@ const HomeScreen = ({ user, setScreen, router }: any) => (
     </ScrollView>
   </View>
 );
-const ChatScreen = ({ user, onBack, THEME, styles }: any) => {
-  const [inbox, setInbox] = useState([
-    { id: 'sarah_1', name: 'Sarah Ahmed', lastMsg: 'Hello', time: '10:45 AM', avatar: 'S', online: true, unread: true, lastTimestamp: Date.now() - 5000 },
-    { id: 'zain_2', name: 'Zain Khan', lastMsg: 'Project is ready', time: '09:20 AM', avatar: 'Z', online: false, unread: false, lastTimestamp: Date.now() - 10000 },
-  ]);
-
-  const [selectedChat, setSelectedChat] = useState<any>(null);
+const ChatScreen = ({ user, onBack, socket, THEME, styles }: any) => {
+  const [inbox, setInbox] = useState<Conversation[]>([]);
+  const [inboxLoading, setInboxLoading] = useState(true);
+  const [selectedChat, setSelectedChat] = useState<Conversation | null>(null);
   const [inputText, setInputText] = useState('');
-  const [messages, setMessages] = useState<any[]>([]);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [showInputTranslate, setShowInputTranslate] = useState(false);
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newUserId, setNewUserId] = useState('');
+  const [newBridgeLoading, setNewBridgeLoading] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  
-  const scrollRef = React.useRef<any>(null);
 
-  // Latest messages hamesha TOP par
-  const sortedInbox = [...inbox].sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+  const scrollRef = useRef<any>(null);
+  const selectedChatRef = useRef<Conversation | null>(null);
+  selectedChatRef.current = selectedChat;
+
+  const {
+    messages,
+    setMessages,
+    onlineUsers,
+    isPartnerTyping,
+    sendMessage: socketSend,
+    deleteMessage,
+    editMessage,
+    sendTypingSignal,
+    joinRoom,
+    leaveRoom,
+  } = useChatSocket({
+    socket,
+    currentUserId: user?._id ?? '',
+    activePartnerId: selectedChat?.partnerId ?? null,
+  });
+
+  // Load inbox conversations on mount
+  useEffect(() => {
+    if (!user?._id) return;
+    chatApi.getConversations(user._id)
+      .then((convs) => setInbox(convs))
+      .catch(() => {})
+      .finally(() => setInboxLoading(false));
+  }, [user?._id]);
+
+  // Update inbox last message when a new message arrives
+  useEffect(() => {
+    if (messages.size === 0) return;
+    const all = Array.from(messages.values());
+    const latest = all[all.length - 1];
+    if (!latest) return;
+    const partnerId =
+      latest.sender === user?._id ? latest.receiver : latest.sender;
+    setInbox((prev) =>
+      prev.map((c) =>
+        c.partnerId === partnerId
+          ? { ...c, lastMessage: latest.message, lastTimestamp: new Date().toISOString() }
+          : c,
+      ),
+    );
+  }, [messages.size]);
+
+  const sortedInbox = [...inbox].sort(
+    (a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime(),
+  );
 
   const handleTranslate = (textToTranslate: string, lang: string, isInput: boolean = false) => {
     const mockTrans: any = {
-      "Hello": { UR: "اسلام علیکم", EN: "Hello", AR: "مرحبا" },
-      "How are you?": { UR: "آپ کیسے ہیں؟", EN: "How are you?", AR: "كيف حالك؟" }
+      Hello: { UR: 'اسلام علیکم', EN: 'Hello', AR: 'مرحبا' },
+      'How are you?': { UR: 'آپ کیسے ہیں؟', EN: 'How are you?', AR: 'كيف حالك؟' },
     };
     const translated = mockTrans[textToTranslate]?.[lang] || `[${lang}] ${textToTranslate}`;
     if (isInput) {
       setInputText(translated);
       setShowInputTranslate(false);
     } else {
-      setMessages(prev => prev.map(m => m.id === activeMenuId ? { ...m, text: translated, isTranslated: true } : m));
+      setMessages((prev) => {
+        if (!prev.has(activeMenuId!)) return prev;
+        const updated = new Map(prev);
+        updated.set(activeMenuId!, { ...updated.get(activeMenuId!)!, message: translated });
+        return updated;
+      });
       setActiveMenuId(null);
     }
   };
 
-  const openChat = (chat: any) => {
-    setInbox(prev => prev.map(item => item.id === chat.id ? { ...item, unread: false } : item));
+  const openChat = async (chat: Conversation) => {
+    // Mark unread as cleared locally
+    setInbox((prev) =>
+      prev.map((item) =>
+        item.partnerId === chat.partnerId ? { ...item, unreadCount: 0 } : item,
+      ),
+    );
     setSelectedChat(chat);
-    setMessages([{ id: 'm1', text: "Hello", sender: 'them', timestamp: new Date() }]);
+    // Fetch history and seed messages Map
+    try {
+      const history = await chatApi.getMessages(user._id, chat.partnerId);
+      const map = new Map(history.map((m) => [m.customId, m]));
+      setMessages(map);
+    } catch {
+      setMessages(new Map());
+    }
+    joinRoom(chat.partnerId);
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 150);
   };
 
-  const startNewBridge = () => {
-    if (!newUserId.trim()) return;
-    const newEntry = { 
-      id: Date.now().toString(), 
-      name: newUserId, 
-      lastMsg: 'Bridge Connected', 
-      time: 'Now', 
-      avatar: newUserId[0].toUpperCase(), 
-      online: true, 
-      unread: false, 
-      lastTimestamp: Date.now() 
-    };
-    setInbox([newEntry, ...inbox]);
-    setShowNewChatModal(false);
-    setNewUserId('');
-    openChat(newEntry);
+  const closeChat = () => {
+    if (selectedChat) leaveRoom(selectedChat.partnerId);
+    setSelectedChat(null);
+    setMessages(new Map());
+    setEditingId(null);
+    setInputText('');
   };
 
-  const sendMessage = () => {
-    if (!inputText.trim()) return;
+  const startNewBridge = async () => {
+    const trimmed = newUserId.trim();
+    if (!trimmed) return;
+    setNewBridgeLoading(true);
+    try {
+      const found = await chatApi.searchUser(trimmed);
+      if (!found) {
+        showAlert('Not Found', `No user with ID "${trimmed}" exists.`);
+        return;
+      }
+      // Check if conversation already in inbox
+      const existing = inbox.find((c) => c.partnerId === found._id);
+      if (existing) {
+        setShowNewChatModal(false);
+        setNewUserId('');
+        openChat(existing);
+        return;
+      }
+      const newEntry: Conversation = {
+        partnerId: found._id,
+        partnerName: found.userId,
+        lastMessage: '',
+        lastTimestamp: new Date().toISOString(),
+        unreadCount: 0,
+        online: onlineUsers.includes(found._id),
+      };
+      setInbox((prev) => [newEntry, ...prev]);
+      setShowNewChatModal(false);
+      setNewUserId('');
+      openChat(newEntry);
+    } catch {
+      showAlert('Not Found', `No user with ID "${trimmed}" exists.`);
+    } finally {
+      setNewBridgeLoading(false);
+    }
+  };
+
+  const handleSend = () => {
+    if (!inputText.trim() || !selectedChat) return;
     if (editingId) {
-      setMessages(prev => prev.map(m => m.id === editingId ? { ...m, text: inputText, isEdited: true } : m));
+      editMessage(editingId, selectedChat.partnerId, inputText);
       setEditingId(null);
     } else {
-      const nMsg = { id: Date.now().toString(), text: inputText, sender: 'me', timestamp: new Date() };
-      setMessages([...messages, nMsg]);
-      setInbox(prev => prev.map(item => 
-        item.id === selectedChat.id ? { ...item, lastMsg: inputText, lastTimestamp: Date.now() } : item
-      ));
+      socketSend(inputText, selectedChat.partnerId, user?.userId ?? '');
+      setInbox((prev) =>
+        prev.map((item) =>
+          item.partnerId === selectedChat.partnerId
+            ? { ...item, lastMessage: inputText, lastTimestamp: new Date().toISOString() }
+            : item,
+        ),
+      );
     }
     setInputText('');
     setShowInputTranslate(false);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
+  const sortedMessages = Array.from(messages.values()).sort(
+    (a, b) => new Date(a.createdAt ?? 0).getTime() - new Date(b.createdAt ?? 0).getTime(),
+  );
+
   // --- RENDERING LOGIC ---
   return (
     <SafeAreaView style={styles.darkPage}>
       <StatusBar barStyle="light-content" />
-      
+
       {/* 1. INBOX LIST VIEW */}
       {!selectedChat ? (
         <View style={{ flex: 1 }}>
           <View style={[styles.navHeader, { borderBottomWidth: 1, borderBottomColor: THEME.border, paddingBottom: 15 }]}>
             <TouchableOpacity style={styles.backBtn} onPress={onBack}><ChevronLeft size={24} color="#fff" /></TouchableOpacity>
             <Text style={styles.navTitle}>Bridge Messenger</Text>
-            <TouchableOpacity 
-              style={[styles.backBtn, { backgroundColor: THEME.primary, borderColor: THEME.primary }]} 
+            <TouchableOpacity
+              style={[styles.backBtn, { backgroundColor: THEME.primary, borderColor: THEME.primary }]}
               onPress={() => setShowNewChatModal(true)}
             >
               <Plus size={24} color="#fff" />
@@ -315,51 +414,86 @@ const ChatScreen = ({ user, onBack, THEME, styles }: any) => {
 
           <ScrollView style={{ paddingHorizontal: 16 }}>
             <Text style={{ marginTop: 15, marginBottom: 10, color: THEME.textMuted, fontSize: 11, fontWeight: '800' }}>ACTIVE BRIDGES</Text>
-            {sortedInbox.map((chat) => (
-              <TouchableOpacity key={chat.id} style={[styles.chatItem, chat.unread && { backgroundColor: 'rgba(6, 182, 212, 0.1)', borderColor: THEME.primary, borderWidth: 1.5 }]} onPress={() => openChat(chat)}>
-                <View><View style={styles.avatarCircle}><Text style={{ color: '#fff', fontSize: 18, fontWeight: '800' }}>{chat.avatar}</Text></View>{chat.online && <View style={styles.onlineDot} />}</View>
-                <View style={{ flex: 1, marginLeft: 15 }}>
-                  <Text style={{ fontWeight: '700', color: chat.unread ? THEME.primary : '#fff', fontSize: 16 }}>{chat.name}</Text>
-                  <Text style={{ color: chat.unread ? '#fff' : THEME.textMuted, fontSize: 13 }} numberOfLines={1}>{chat.lastMsg}</Text>
-                </View>
-                <View style={{ alignItems: 'flex-end' }}><Text style={{ color: THEME.textMuted, fontSize: 10 }}>{chat.time}</Text>{chat.unread && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: THEME.primary, marginTop: 8 }} />}</View>
-              </TouchableOpacity>
-            ))}
+            {inboxLoading ? (
+              <ActivityIndicator color={THEME.primary} style={{ marginTop: 30 }} />
+            ) : sortedInbox.length === 0 ? (
+              <Text style={{ color: THEME.textMuted, textAlign: 'center', marginTop: 40 }}>No conversations yet. Tap + to start a bridge.</Text>
+            ) : (
+              sortedInbox.map((chat) => {
+                const hasUnread = chat.unreadCount > 0;
+                const isOnline = onlineUsers.includes(chat.partnerId);
+                return (
+                  <TouchableOpacity key={chat.partnerId} style={[styles.chatItem, hasUnread && { backgroundColor: 'rgba(6, 182, 212, 0.1)', borderColor: THEME.primary, borderWidth: 1.5 }]} onPress={() => openChat(chat)}>
+                    <View>
+                      <View style={styles.avatarCircle}><Text style={{ color: '#fff', fontSize: 18, fontWeight: '800' }}>{chat.partnerName[0]?.toUpperCase()}</Text></View>
+                      {isOnline && <View style={styles.onlineDot} />}
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 15 }}>
+                      <Text style={{ fontWeight: '700', color: hasUnread ? THEME.primary : '#fff', fontSize: 16 }}>{chat.partnerName}</Text>
+                      <Text style={{ color: hasUnread ? '#fff' : THEME.textMuted, fontSize: 13 }} numberOfLines={1}>{chat.lastMessage}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={{ color: THEME.textMuted, fontSize: 10 }}>
+                        {chat.lastTimestamp ? new Date(chat.lastTimestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                      </Text>
+                      {hasUnread && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: THEME.primary, marginTop: 8 }} />}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })
+            )}
           </ScrollView>
         </View>
       ) : (
         /* 2. CHAT DETAIL VIEW */
         <View style={{ flex: 1 }}>
           <View style={[styles.navHeader, { borderBottomWidth: 1, borderBottomColor: THEME.border, paddingBottom: 15 }]}>
-            <TouchableOpacity style={styles.backBtn} onPress={() => setSelectedChat(null)}><ChevronLeft size={24} color="#fff" /></TouchableOpacity>
-            <View style={{ alignItems: 'center' }}><Text style={styles.navTitle}>{selectedChat.name}</Text><Text style={{ color: THEME.success, fontSize: 10, fontWeight: '700' }}>● ONLINE</Text></View>
+            <TouchableOpacity style={styles.backBtn} onPress={closeChat}><ChevronLeft size={24} color="#fff" /></TouchableOpacity>
+            <View style={{ alignItems: 'center' }}>
+              <Text style={styles.navTitle}>{selectedChat.partnerName}</Text>
+              {isPartnerTyping
+                ? <Text style={{ color: THEME.primary, fontSize: 10, fontWeight: '700' }}>● typing...</Text>
+                : onlineUsers.includes(selectedChat.partnerId)
+                  ? <Text style={{ color: THEME.success, fontSize: 10, fontWeight: '700' }}>● ONLINE</Text>
+                  : <Text style={{ color: THEME.textMuted, fontSize: 10, fontWeight: '700' }}>● OFFLINE</Text>
+              }
+            </View>
             <TouchableOpacity style={styles.backBtn}><MoreVertical size={20} color="#fff" /></TouchableOpacity>
           </View>
 
           <ScrollView ref={scrollRef} contentContainerStyle={{ padding: 20 }}>
-            {messages.map((m) => {
-              const isMe = m.sender === 'me';
-              const isMenuOpen = activeMenuId === m.id;
+            {sortedMessages.map((m) => {
+              const isMe = m.sender === user?._id;
+              const isMenuOpen = activeMenuId === m.customId;
               return (
-                <View key={m.id} style={{ marginBottom: 15, width: '100%', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
-                  <TouchableOpacity activeOpacity={0.8} onPress={() => setActiveMenuId(isMenuOpen ? null : m.id)} style={[styles.chatBubble, isMe ? styles.bubbleMe : styles.bubbleThem, isMenuOpen && { borderColor: THEME.primary, borderWidth: 1 }]}>
-                    <Text style={{ color: '#fff', fontSize: 16 }}>{m.text}</Text>
-                    <View style={{flexDirection: 'row', justifyContent: 'space-between', marginTop: 4}}>
-                       <Text style={{ fontSize: 9, color: 'rgba(255,255,255,0.5)' }}>{m.isEdited && "Edited • "}{m.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
-                       {isMe && (
-                         <View style={{flexDirection: 'row', gap: 10, marginLeft: 10}}>
-                            <TouchableOpacity onPress={() => { setInputText(m.text); setEditingId(m.id); setActiveMenuId(null); }}><Text style={{color: '#fff', fontSize: 10, opacity: 0.6}}>Edit</Text></TouchableOpacity>
-                            <TouchableOpacity onPress={() => setMessages(prev => prev.filter(msg => msg.id !== m.id))}><Text style={{color: THEME.danger, fontSize: 10, fontWeight: '700'}}>Del</Text></TouchableOpacity>
-                         </View>
-                       )}
+                <View key={m.customId} style={{ marginBottom: 15, width: '100%', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
+                  <TouchableOpacity activeOpacity={0.8} onPress={() => setActiveMenuId(isMenuOpen ? null : m.customId)} style={[styles.chatBubble, isMe ? styles.bubbleMe : styles.bubbleThem, isMenuOpen && { borderColor: THEME.primary, borderWidth: 1 }]}>
+                    <Text style={{ color: '#fff', fontSize: 16 }}>{m.message}</Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+                      <Text style={{ fontSize: 9, color: 'rgba(255,255,255,0.5)' }}>
+                        {m.isEdited && 'Edited • '}
+                        {m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                      </Text>
+                      {isMe && (
+                        <View style={{ flexDirection: 'row', gap: 10, marginLeft: 10 }}>
+                          <TouchableOpacity onPress={() => { setInputText(m.message); setEditingId(m.customId); setActiveMenuId(null); }}>
+                            <Text style={{ color: '#fff', fontSize: 10, opacity: 0.6 }}>Edit</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => deleteMessage(m.customId, selectedChat.partnerId)}>
+                            <Text style={{ color: THEME.danger, fontSize: 10, fontWeight: '700' }}>Del</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
                     </View>
                   </TouchableOpacity>
                   {isMenuOpen && (
                     <View style={{ backgroundColor: '#1E293B', borderRadius: 12, padding: 10, marginTop: 5, width: 220, borderWidth: 1, borderColor: THEME.primary, zIndex: 50 }}>
                       <Text style={{ color: '#94A3B8', fontSize: 10, marginBottom: 8, fontWeight: '700' }}>READ INTO:</Text>
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 5 }}>
-                        {['UR', 'EN', 'AR'].map(l => (
-                          <TouchableOpacity key={l} onPress={() => handleTranslate(m.text, l)} style={{ flex: 1, backgroundColor: '#0F172A', padding: 8, borderRadius: 8, alignItems: 'center' }}><Text style={{ color: '#fff', fontSize: 11 }}>{l}</Text></TouchableOpacity>
+                        {['UR', 'EN', 'AR'].map((l) => (
+                          <TouchableOpacity key={l} onPress={() => handleTranslate(m.message, l)} style={{ flex: 1, backgroundColor: '#0F172A', padding: 8, borderRadius: 8, alignItems: 'center' }}>
+                            <Text style={{ color: '#fff', fontSize: 11 }}>{l}</Text>
+                          </TouchableOpacity>
                         ))}
                       </View>
                     </View>
@@ -371,7 +505,7 @@ const ChatScreen = ({ user, onBack, THEME, styles }: any) => {
 
           {showInputTranslate && (
             <View style={{ position: 'absolute', bottom: 85, left: 20, backgroundColor: THEME.surface, padding: 12, borderRadius: 15, flexDirection: 'row', gap: 10, borderWidth: 1, borderColor: THEME.primary, zIndex: 1000 }}>
-              {['UR', 'EN', 'AR'].map(l => (
+              {['UR', 'EN', 'AR'].map((l) => (
                 <TouchableOpacity key={l} onPress={() => handleTranslate(inputText, l, true)} style={{ padding: 10, backgroundColor: THEME.background, borderRadius: 10, minWidth: 45, alignItems: 'center' }}>
                   <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>{l}</Text>
                 </TouchableOpacity>
@@ -381,35 +515,55 @@ const ChatScreen = ({ user, onBack, THEME, styles }: any) => {
 
           <View style={{ flexDirection: 'row', alignItems: 'center', padding: 15, backgroundColor: THEME.background, gap: 10 }}>
             <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: THEME.surface, borderRadius: 25, paddingHorizontal: 15, borderWidth: 1, borderColor: editingId ? THEME.success : THEME.border }}>
-              <TextInput placeholder={editingId ? "Edit message..." : "Type here..."} placeholderTextColor={THEME.textMuted} style={{ flex: 1, color: '#fff', paddingVertical: 10 }} value={inputText} onChangeText={setInputText} />
+              <TextInput
+                placeholder={editingId ? 'Edit message...' : 'Type here...'}
+                placeholderTextColor={THEME.textMuted}
+                style={{ flex: 1, color: '#fff', paddingVertical: 10 }}
+                value={inputText}
+                onChangeText={(v) => {
+                  setInputText(v);
+                  if (selectedChat) sendTypingSignal(selectedChat.partnerId);
+                }}
+              />
               {inputText.length > 0 && !editingId && (
-                <TouchableOpacity onPress={() => setShowInputTranslate(!showInputTranslate)} style={{ padding: 5 }}><Globe size={22} color={THEME.primary} /></TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowInputTranslate(!showInputTranslate)} style={{ padding: 5 }}>
+                  <Globe size={22} color={THEME.primary} />
+                </TouchableOpacity>
               )}
             </View>
-            <TouchableOpacity onPress={sendMessage}>
-              <LinearGradient colors={[THEME.primary, THEME.secondary]} style={{ width: 45, height: 45, borderRadius: 22.5, justifyContent: 'center', alignItems: 'center' }}><Send size={20} color="#fff" /></LinearGradient>
+            <TouchableOpacity onPress={handleSend}>
+              <LinearGradient colors={[THEME.primary, THEME.secondary]} style={{ width: 45, height: 45, borderRadius: 22.5, justifyContent: 'center', alignItems: 'center' }}>
+                <Send size={20} color="#fff" />
+              </LinearGradient>
             </TouchableOpacity>
           </View>
         </View>
       )}
 
-      {/* 3. NEW CHAT MODAL (Universal Popup) */}
+      {/* 3. NEW CHAT MODAL */}
       {showNewChatModal && (
         <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', zIndex: 5000, padding: 25 }}>
           <View style={{ width: '100%', backgroundColor: THEME.surface, borderRadius: 25, padding: 25, borderWidth: 1, borderColor: THEME.border }}>
             <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800', marginBottom: 20 }}>Connect New Bridge</Text>
-            <TextInput 
-              placeholder="Enter User ID (e.g. Zain_01)" 
-              placeholderTextColor={THEME.textMuted} 
-              style={{ backgroundColor: THEME.background, padding: 15, borderRadius: 15, color: '#fff', marginBottom: 20, borderWidth: 1, borderColor: THEME.border }} 
-              value={newUserId} 
-              onChangeText={setNewUserId} 
-              autoFocus 
+            <TextInput
+              placeholder="Enter User ID (e.g. Zain_01)"
+              placeholderTextColor={THEME.textMuted}
+              style={{ backgroundColor: THEME.background, padding: 15, borderRadius: 15, color: '#fff', marginBottom: 20, borderWidth: 1, borderColor: THEME.border }}
+              value={newUserId}
+              onChangeText={setNewUserId}
+              autoFocus
             />
             <View style={{ flexDirection: 'row', gap: 10 }}>
-              <TouchableOpacity style={{ flex: 1, padding: 15, alignItems: 'center' }} onPress={() => setShowNewChatModal(false)}><Text style={{ color: THEME.textMuted, fontWeight: '700' }}>Cancel</Text></TouchableOpacity>
-              <TouchableOpacity style={{ flex: 2 }} onPress={startNewBridge}>
-                <LinearGradient colors={[THEME.primary, THEME.secondary]} style={{ padding: 15, borderRadius: 15, alignItems: 'center' }}><Text style={{ color: '#fff', fontWeight: 'bold' }}>Start Chat</Text></LinearGradient>
+              <TouchableOpacity style={{ flex: 1, padding: 15, alignItems: 'center' }} onPress={() => { setShowNewChatModal(false); setNewUserId(''); }}>
+                <Text style={{ color: THEME.textMuted, fontWeight: '700' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={{ flex: 2 }} onPress={startNewBridge} disabled={newBridgeLoading}>
+                <LinearGradient colors={[THEME.primary, THEME.secondary]} style={{ padding: 15, borderRadius: 15, alignItems: 'center' }}>
+                  {newBridgeLoading
+                    ? <ActivityIndicator color="#fff" />
+                    : <Text style={{ color: '#fff', fontWeight: 'bold' }}>Start Chat</Text>
+                  }
+                </LinearGradient>
               </TouchableOpacity>
             </View>
           </View>
@@ -920,7 +1074,7 @@ export default function App() {
 
  // 1. Messenger Screen (Strict Match)
 if (screen === 'chat-active') {
-  return <ChatScreen user={user} onBack={() => setScreen('home')} THEME={THEME} styles={styles} />;
+  return <ChatScreen user={user} onBack={() => setScreen('home')} socket={socket} THEME={THEME} styles={styles} />;
 }
 
 // 2. Voice Call Screen (Sirf tab jab screen 'active' ho)
@@ -1212,11 +1366,12 @@ if (screen === 'active') {
         </View>
       )}
 {screen === 'chat-active' && (
-  <ChatScreen 
-    user={user} 
-    onBack={() => setScreen('home')} 
-    THEME={THEME} 
-    styles={styles} 
+  <ChatScreen
+    user={user}
+    onBack={() => setScreen('home')}
+    socket={socket}
+    THEME={THEME}
+    styles={styles}
   />
 )}
       {screen === 'home' && <HomeScreen user={user} setScreen={setScreen} router={router} />}

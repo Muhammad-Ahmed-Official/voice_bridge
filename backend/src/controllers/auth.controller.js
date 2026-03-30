@@ -80,6 +80,26 @@ export const signIn = async (req, res) => {
   }
 };
 
+// Search user by userId string (for starting a new chat bridge)
+export const searchUser = async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (typeof userId !== 'string' || !userId.trim()) {
+      return res.status(400).json({ status: false, message: 'userId query param is required' });
+    }
+    const user = await User.findOne({ userId: { $regex: new RegExp(`^${userId.trim()}$`, 'i') } });
+    if (!user) {
+      return res.status(404).json({ status: false, message: 'User not found' });
+    }
+    return res.status(200).json({
+      status: true,
+      user: { _id: user._id, userId: user.userId },
+    });
+  } catch (error) {
+    return res.status(500).json({ status: false, message: error.message });
+  }
+};
+
 // Simple preferences endpoint: update global voice cloning flag
 export const updatePreferences = async (req, res) => {
   try {

@@ -3,6 +3,7 @@ import cors from "cors";
 import { isDbConnected, ensureConnection } from "./db/index.js";
 import authRouter from "./routes/auth.routes.js";
 import historyRouter from "./routes/history.routes.js";
+import chatRouter from "./routes/chat.routes.js";
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use("/api/v1", async (req, res, next) => {
 
 app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/history", historyRouter);
+app.use("/api/v1/chat", chatRouter);
 
 app.use((req, res) => {
   res.status(404).json({ message: "Not Found" });

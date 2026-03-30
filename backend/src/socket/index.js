@@ -11,6 +11,7 @@ getOtherParticipant,
 addDiscoverableUser,
 removeDiscoverableUser,
 getAllDiscoverableUsers,
+getOnlineUserIds,
 } from './roomManager.js';
 import {
   createMeeting,
@@ -40,6 +41,7 @@ import {
   markUserCallEnded,
 } from '../services/voiceCloning.js';
 import { User } from '../models/user.models.js';
+import { Chat } from '../models/chat.model.js';
 
 const LOCALE_MAP  = { UR: 'ur-PK', EN: 'en-US', AR: 'ar-SA' };
 const VALID_LANGS = new Set(['UR', 'EN', 'AR']);
@@ -308,6 +310,7 @@ export function initSocket(httpServer) {
       socket.data.odId = odId;
       registerUser(userId, socket.id);
       console.log(`[socket] registered: ${userId} (${odId || 'no _id'}) → ${socket.id}`);
+      io.emit('getOnlineUser', getOnlineUserIds());
     });
 
     socket.on('start-discoverable', ({ userId, name }) => {
@@ -1127,12 +1130,70 @@ export function initSocket(httpServer) {
       }
     });
 
+    // ── Bridge Messenger ─────────────────────────────────────────────────────
+
+    socket.on('joinRoom', (chatId) => {
+      if (!socket.rooms.has(chatId)) {
+        socket.join(chatId);
+      }
+      console.log(`[Chat] socket ${socket.id} joined room ${chatId}`);
+    });
+
+    socket.on('leaveRoom', (chatId) => {
+      socket.leave(chatId);
+      console.log(`[Chat] socket ${socket.id} left room ${chatId}`);
+    });
+
+    socket.on('message', async (data) => {
+      const { sender, receiver, message, customId, userName } = data;
+      if (!receiver) return;
+
+      const receiverSockets = await io.in(receiver).fetchSockets();
+      const isReceiverInRoom = receiverSockets.length > 0;
+      const payload = { sender, receiver, message, customId, userName, isReceiverInRoom };
+
+      io.to(receiver).emit('newMessage', payload);
+      try {
+        await Chat.create({ customId, sender, receiver, message, userName, isReceiverInRoom });
+      } catch (error) {
+        console.error('[Chat] message save failed:', error.message);
+      }
+    });
+
+    socket.on('userMsg', ({ sender, receiver }) => {
+      if (!sender || !receiver) return;
+      io.to(receiver).emit('userMsg', sender);
+    });
+
+    socket.on('delete', async (data) => {
+      const { customId, receiver } = data;
+      if (!customId || !receiver) return;
+      io.to(receiver).emit('deleteMsg', customId);
+      try {
+        await Chat.findOneAndDelete({ customId });
+      } catch (error) {
+        console.error('[Chat] message delete failed:', error.message);
+      }
+    });
+
+    socket.on('edit', async (data) => {
+      const { customId, receiver, message } = data;
+      if (!receiver || !customId) return;
+      io.to(receiver).emit('editMsg', { receiver, message, customId });
+      try {
+        await Chat.findOneAndUpdate({ customId }, { message });
+      } catch (error) {
+        console.error('[Chat] message edit failed:', error.message);
+      }
+    });
+
     // ── disconnect ────────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
       const userId = socket.data.userId;
       if (userId) {
         unregisterUser(userId);
         removeDiscoverableUser(userId);
+        io.emit('getOnlineUser', getOnlineUserIds());
       }
       // Clean up pipeline state maps so stale entries don't block future connections
       sttInFlight.delete(socket.id);

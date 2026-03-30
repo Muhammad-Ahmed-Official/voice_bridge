@@ -62,3 +62,7 @@ export function getAllDiscoverableUsers() {
   });
   return list;
 }
+
+export function getOnlineUserIds() {
+  return Array.from(userSocketMap.keys());
+}
