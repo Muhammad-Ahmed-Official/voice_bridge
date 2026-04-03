@@ -430,6 +430,7 @@ export function initSocket(httpServer) {
         voiceCloningEnabled: false,
       };
 
+      // ── 1. Create room synchronously — roomId is live from this point ───────
       createRoom(roomId, userA, userB);
       markUserCallActive(callerId);
       markUserCallActive(socket.data.userId);
@@ -443,77 +444,17 @@ export function initSocket(httpServer) {
       console.log(`║  UserA speaks ${userA.speakLang.padEnd(2)} → STT(${userA.speakLang}) → Translate(${userA.speakLang}→${userB.hearLang}) → TTS(${userB.hearLang}) → UserB ║`);
       console.log(`║  UserB speaks ${userB.speakLang.padEnd(2)} → STT(${userB.speakLang}) → Translate(${userB.speakLang}→${userA.hearLang}) → TTS(${userA.hearLang}) → UserA ║`);
       console.log(`╚════════════════════════════════════════════════════════════════════════╝\n`);
+      console.log(`[socket] room created: ${roomId}`);
 
       // Remove both users from discoverable list when a call starts
       removeDiscoverableUser(callerId);
       removeDiscoverableUser(socket.data.userId);
       broadcastDiscoverableList(io);
 
-      // ── Voice Cloning: init buffers for users who have it enabled ────────
-      try {
-        const [userADoc, userBDoc] = await Promise.all([
-          User.findOne({ userId: callerId }).lean(),
-          User.findOne({ userId: socket.data.userId }).lean(),
-        ]);
-
-        // Persist cloning preference on the room objects (mutating in-place is safe
-        // because createRoom stores a reference to the same object).
-        userA.voiceCloningEnabled = !!userADoc?.voiceCloningEnabled;
-        userB.voiceCloningEnabled = !!userBDoc?.voiceCloningEnabled;
-
-        console.log(`[VoiceClone] Cloning flags — ${callerId}: ${userA.voiceCloningEnabled} | ${socket.data.userId}: ${userB.voiceCloningEnabled}`);
-
-        // Init a clone buffer for every user who has cloning ON, regardless of what the
-        // other user has chosen. In CASE 3 (both ON) both buffers are needed so each
-        // user's voice can be cloned for the other to hear.
-        const userACanClone = userA.voiceCloningEnabled;
-        const userBCanClone = userB.voiceCloningEnabled;
-
-        if (userACanClone) {
-          const existingVoiceA =
-            typeof userADoc?.voiceId === 'string' && userADoc.voiceId.length > 0
-              ? userADoc.voiceId
-              : null;
-          initCloneBuffer(callerSocketId, callerId, existingVoiceA);
-          if (existingVoiceA) {
-            io.to(callerSocketId).emit('clone-ready', {
-              status: 'ready',
-              voiceId: existingVoiceA,
-              message: 'Using your saved cloned voice.',
-            });
-          } else {
-            io.to(callerSocketId).emit('clone-started', {
-              status: 'buffering',
-              message: 'Recording your voice for cloning…',
-            });
-          }
-        }
-
-        if (userBCanClone) {
-          const existingVoiceB =
-            typeof userBDoc?.voiceId === 'string' && userBDoc.voiceId.length > 0
-              ? userBDoc.voiceId
-              : null;
-          initCloneBuffer(socket.id, socket.data.userId, existingVoiceB);
-          if (existingVoiceB) {
-            socket.emit('clone-ready', {
-              status: 'ready',
-              voiceId: existingVoiceB,
-              message: 'Using your saved cloned voice.',
-            });
-          } else {
-            socket.emit('clone-started', {
-              status: 'buffering',
-              message: 'Recording your voice for cloning…',
-            });
-          }
-        }
-      } catch (cloneInitErr) {
-        // Non-fatal — call still proceeds with default TTS
-        console.warn('[VoiceClone] Could not init clone buffer:', cloneInitErr.message);
-      }
-
-      // Notify caller
+      // ── 2. Notify both clients immediately — roomId must reach them NOW ──────
+      // Voice cloning init is async and must NEVER gate this signal. Clients need
+      // roomId before they can send audio-chunk; delaying call-accepted here was
+      // the root cause of "roomId missing / inconsistent when cloning=true".
       io.to(callerSocketId).emit('call-accepted', {
         roomId,
         peerOdId: userB.odId,
@@ -521,8 +462,6 @@ export function initSocket(httpServer) {
         peerSpeakLang: userB.speakLang,
         peerHearLang: userB.hearLang,
       });
-
-      // Notify accepter
       socket.emit('call-accepted', {
         roomId,
         peerOdId: userA.odId,
@@ -531,7 +470,45 @@ export function initSocket(httpServer) {
         peerHearLang: userA.hearLang,
       });
 
-      console.log(`[socket] room created: ${roomId}`);
+      // ── 3. Voice cloning init — fire-and-forget, never blocks the call ───────
+      (async () => {
+        try {
+          const [userADoc, userBDoc] = await Promise.all([
+            User.findOne({ userId: callerId }).lean(),
+            User.findOne({ userId: socket.data.userId }).lean(),
+          ]);
+
+          // Mutating in-place is safe — createRoom stores a reference to the same objects,
+          // so resolveAudioStrategy will see the updated flags on the next audio-chunk.
+          userA.voiceCloningEnabled = !!userADoc?.voiceCloningEnabled;
+          userB.voiceCloningEnabled = !!userBDoc?.voiceCloningEnabled;
+
+          console.log(`[VoiceClone] Init started after room ${roomId} — ${callerId}: ${userA.voiceCloningEnabled} | ${socket.data.userId}: ${userB.voiceCloningEnabled}`);
+
+          if (userA.voiceCloningEnabled) {
+            const existingVoiceA =
+              typeof userADoc?.voiceId === 'string' && userADoc.voiceId.length > 0
+                ? userADoc.voiceId : null;
+            initCloneBuffer(callerSocketId, callerId, existingVoiceA);
+            io.to(callerSocketId).emit(existingVoiceA ? 'clone-ready' : 'clone-started', existingVoiceA
+              ? { status: 'ready', voiceId: existingVoiceA, message: 'Using your saved cloned voice.' }
+              : { status: 'buffering', message: 'Recording your voice for cloning…' });
+          }
+
+          if (userB.voiceCloningEnabled) {
+            const existingVoiceB =
+              typeof userBDoc?.voiceId === 'string' && userBDoc.voiceId.length > 0
+                ? userBDoc.voiceId : null;
+            initCloneBuffer(socket.id, socket.data.userId, existingVoiceB);
+            socket.emit(existingVoiceB ? 'clone-ready' : 'clone-started', existingVoiceB
+              ? { status: 'ready', voiceId: existingVoiceB, message: 'Using your saved cloned voice.' }
+              : { status: 'buffering', message: 'Recording your voice for cloning…' });
+          }
+        } catch (cloneInitErr) {
+          // Non-fatal — call continues with default Google TTS
+          console.warn(`[VoiceClone] Could not init clone buffer for room ${roomId}:`, cloneInitErr.message);
+        }
+      })();
     });
 
     socket.on('decline-call', ({ callerId }) => {
