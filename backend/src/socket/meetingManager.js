@@ -14,14 +14,17 @@ export function createMeeting(meetingId, hostEntry) {
   socketMeetingMap.set(hostEntry.socketId, meetingId);
 }
 
-export function addInvitedParticipant(meetingId, userId, speakLang, hearLang) {
+// speakLang / hearLang are intentionally NOT stored at invite time.
+// Each invitee owns their own language preferences and provides them
+// only when they call join-meeting. Until then both fields are null.
+export function addInvitedParticipant(meetingId, userId) {
   const room = meetingRooms.get(meetingId);
   if (!room) return;
   room.participants.set(userId, {
     userId,
     socketId: null,
-    speakLang,
-    hearLang,
+    speakLang: null,
+    hearLang:  null,
     status: 'invited',
   });
 }

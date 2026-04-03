@@ -50,6 +50,10 @@ const BUFFER_DELAY_MS = 1500; // flush after 1.5s of silence
 const sttInFlight = new Map();
 const ttsInFlight = new Map();
 const roomsClosing = new Set();
+// pendingCalls: stores caller's lang prefs when call-user fires so accept-call
+// never depends on a potentially stale socket.data reference.
+// Map<callerId → { speakLang, hearLang, callerSocketId }>
+const pendingCalls = new Map();
 
 function broadcastDiscoverableList(io) {
   const all = getAllDiscoverableUsers();
@@ -369,6 +373,15 @@ export function initSocket(httpServer) {
       socket.data.speakLang = speakLang;
       socket.data.hearLang  = hearLang;
 
+      // Store lang prefs durably so accept-call never needs to read socket.data
+      // from a possibly-stale caller socket reference.
+      pendingCalls.set(socket.data.userId, {
+        speakLang,
+        hearLang,
+        callerSocketId: socket.id,
+      });
+      console.log(`[Call] pending: ${socket.data.userId} → ${targetUserId} | speak=${speakLang} hear=${hearLang}`);
+
       io.to(targetSocketId).emit('incoming-call', {
         callerId: socket.data.userId,
         callerName: callerName || socket.data.userId,
@@ -377,28 +390,37 @@ export function initSocket(httpServer) {
 
     // ── accept-call ──────────────────────────────────────────────────────────
     socket.on('accept-call', async ({ callerId, speakLang, hearLang }) => {
+      // Read caller's live socketId from the map
       const callerSocketId = getSocketIdForUser(callerId);
       if (!callerSocketId) {
         socket.emit('call-error', { message: 'Caller is no longer online.' });
         return;
       }
 
-      const callerSocket = io.sockets.sockets.get(callerSocketId);
-      const roomId = `${callerId}_${socket.data.userId}_${Date.now()}`;
+      // Read lang prefs from pendingCalls — never from socket.data (stale on reconnect)
+      const pending = pendingCalls.get(callerId);
+      if (!pending) {
+        socket.emit('call-error', { message: 'Call session expired. Please ask the caller to retry.' });
+        console.error(`[accept-call] REJECTED — no pendingCalls entry for caller ${callerId}`);
+        return;
+      }
+      pendingCalls.delete(callerId); // consume
 
-     
-      const rawSpeakA = callerSocket?.data.speakLang;
-      const rawHearA  = callerSocket?.data.hearLang;
+      const rawSpeakA = pending.speakLang;
+      const rawHearA  = pending.hearLang;
+
       if (!VALID_LANGS.has(rawSpeakA) || !VALID_LANGS.has(rawHearA)) {
         socket.emit('call-error', {
-          message: 'Caller language configuration is missing or invalid. Please retry the call.',
+          message: 'Caller language configuration is invalid. Please retry the call.',
         });
         console.error(
-          `[accept-call] REJECTED room — caller ${callerId} has invalid langs: ` +
+          `[accept-call] REJECTED — caller ${callerId} stored invalid langs: ` +
           `speakLang=${rawSpeakA} hearLang=${rawHearA}`,
         );
         return;
       }
+
+      const roomId = `${callerId}_${socket.data.userId}_${Date.now()}`;
 
       // Validate accepter's language selection before building the room.
       // Without this, an invalid/missing code silently falls back to en-US in LOCALE_MAP.
@@ -809,15 +831,36 @@ export function initSocket(httpServer) {
     });
 
     socket.on('create-meeting', ({ meetingId, hostSpeakLang, hostHearLang, invitees }) => {
-      console.log("OK")
       const hostUserId = socket.data.userId;
       if (!hostUserId) {
         socket.emit('meeting-error', { message: 'Not registered.' });
         return;
       }
+
+      // Validate host's own languages — only the host's own langs are provided here.
+      if (!VALID_LANGS.has(hostSpeakLang) || !VALID_LANGS.has(hostHearLang)) {
+        socket.emit('meeting-error', {
+          message: `Invalid host language configuration (speakLang=${hostSpeakLang}, hearLang=${hostHearLang}). Expected: UR | EN | AR`,
+        });
+        console.warn(`[Meeting] create-meeting: invalid host langs from ${hostUserId}: speak=${hostSpeakLang} hear=${hostHearLang}`);
+        return;
+      }
+
       if (!Array.isArray(invitees) || invitees.length < 2 || invitees.length > 4) {
         socket.emit('meeting-error', { message: 'Invitees must be between 2 and 4.' });
         return;
+      }
+
+      // Validate invitee list: only userId is expected — no langs
+      for (const inv of invitees) {
+        if (!inv.userId || typeof inv.userId !== 'string') {
+          socket.emit('meeting-error', { message: 'Each invitee must have a valid userId.' });
+          return;
+        }
+        if (inv.userId === hostUserId) {
+          socket.emit('meeting-error', { message: 'Host cannot invite themselves.' });
+          return;
+        }
       }
 
       // Resolve all invitee sockets and validate online / not-busy
@@ -832,21 +875,24 @@ export function initSocket(httpServer) {
           socket.emit('meeting-error', { message: `User "${inv.userId}" is currently busy.` });
           return;
         }
-        resolved.push({ ...inv, socketId: sid });
+        resolved.push({ userId: inv.userId, socketId: sid });
       }
 
-      // Build meeting
+      // Build meeting — host's langs stored now, invitees' langs stored at join-meeting
       const hostEntry = {
-        userId: hostUserId,
-        socketId: socket.id,
+        userId:    hostUserId,
+        socketId:  socket.id,
         speakLang: hostSpeakLang,
-        hearLang: hostHearLang,
+        hearLang:  hostHearLang,
       };
       createMeeting(meetingId, hostEntry);
+
+      // addInvitedParticipant stores null langs — invitees set their own at join time
       for (const inv of resolved) {
-        addInvitedParticipant(meetingId, inv.userId, inv.speakLang, inv.hearLang);
+        addInvitedParticipant(meetingId, inv.userId);
       }
 
+      // Config sent to host: invitees show null langs (they haven't joined yet)
       const config = getAllParticipantEntries(meetingId).map(e => ({
         userId: e.userId, speak: e.speakLang, hear: e.hearLang, status: e.status,
       }));
@@ -862,7 +908,7 @@ export function initSocket(httpServer) {
         });
       }
 
-      console.log(`[Meeting] ${hostUserId} created meeting ${meetingId}`);
+      console.log(`[Meeting] created id=${meetingId} host=${hostUserId}(${hostSpeakLang}→${hostHearLang}) invitees=[${resolved.map(i => i.userId).join(', ')}]`);
     });
 
     // ── decline-meeting ───────────────────────────────────────────────────────
@@ -907,9 +953,10 @@ export function initSocket(httpServer) {
         return;
       }
 
-      // Promote participant from 'invited' → 'joined' and bind their live socket
+      // Promote participant from 'invited' → 'joined' and bind their live socket.
+      // speakLang / hearLang here are the invitee's OWN selection — authoritative.
       participantJoined(meetingId, userId, socket.id, speakLang, hearLang);
-      console.log(`[Meeting] ${userId} joined meeting ${meetingId} → socketId: ${socket.id}`);
+      console.log(`[Join] user=${userId} speak=${speakLang} hear=${hearLang} meeting=${meetingId} socket=${socket.id}`);
 
       // ── Voice Cloning: init buffer if user has it enabled ─────────────────
       try {
@@ -973,24 +1020,34 @@ export function initSocket(httpServer) {
       const senderEntry = room.participants.get(senderId);
       if (!senderEntry) return;
 
+      // Guard: sender must have joined with their own language selection
+      if (!senderEntry.speakLang) {
+        console.warn(`[Meeting] speech-text dropped — ${senderId} has no speakLang yet`);
+        return;
+      }
+
       const senderCloningEnabled = !!senderEntry.voiceCloningEnabled;
       const fromLang              = senderEntry.speakLang;
-      const joined = getJoinedParticipants(meetingId).filter(p => p.userId !== senderId);
+      // Only route to listeners who have completed join-meeting (hearLang is set)
+      const joined = getJoinedParticipants(meetingId).filter(
+        p => p.userId !== senderId && p.hearLang !== null,
+      );
 
       socket.emit('meeting-speech-transcript', { text });
 
       // Read cloneVoiceId at execution time — not a stale closure capture
       const freshCloneId = getClonedVoiceId(socket.id);
 
-      // ── Per-listener cloning decision (4-case matrix) ──────────────────────
+      // ── Per-listener routing + cloning decision (4-case matrix) ─────────────
+      // CASE 1 + CASE 3: sender clone is used whenever sender has cloning ON + voice ready.
       const listenerMeta = joined.map(r => {
         const listenerCloningEnabled = !!r.voiceCloningEnabled;
-        // CASE 1 only: sender ON, listener OFF, voice ready, limit not hit
         const useClonedVoice =
           senderCloningEnabled &&
-          !listenerCloningEnabled &&
           !!freshCloneId &&
           !isVoiceLimitReached(socket.id);
+        const needsTranslation = fromLang !== r.hearLang;
+        console.log(`[Route] ${senderId}(${fromLang}) → ${r.userId}(${r.hearLang}) | translate=${needsTranslation} clone=${useClonedVoice}`);
         return { ...r, listenerCloningEnabled, useClonedVoice };
       });
 
@@ -1065,19 +1122,30 @@ export function initSocket(httpServer) {
       const senderEntry = room.participants.get(senderId);
       if (!senderEntry) return;
 
+      // Guard: reject audio if this participant hasn't joined with their own
+      // language selection yet (speakLang / hearLang are null until join-meeting fires).
+      if (!senderEntry.speakLang) {
+        console.warn(`[Meeting] audio dropped — ${senderId} has no speakLang yet (not joined)`);
+        return;
+      }
+
       const senderCloningEnabled = !!senderEntry.voiceCloningEnabled;
-      const speakLang            = senderEntry.speakLang;
-      const languageCode         = LOCALE_MAP[speakLang] ?? 'en-US';
-      const joined = getJoinedParticipants(meetingId).filter(p => p.userId !== senderId);
+      const speakLang            = senderEntry.speakLang;   // set by join-meeting
+      const languageCode         = LOCALE_MAP[speakLang];   // undefined → caught by guard above
+      // Only route to listeners who have joined with their own lang selection.
+      // Skip anyone still in 'invited' state (hearLang = null).
+      const joined = getJoinedParticipants(meetingId).filter(
+        p => p.userId !== senderId && p.hearLang !== null,
+      );
 
       // ── Voice clone buffering ────────────────────────────────────────────────
-      // Only buffer when CASE 1 is possible: sender ON + at least one listener OFF.
-      // Skip entirely for CASE 3 (both ON) to avoid wasting ElevenLabs quota.
-      const anyListenerCloningOff = joined.some(p => !p.voiceCloningEnabled);
+      // Buffer whenever the SENDER has cloning ON (CASE 1 + CASE 3).
+      // The sender's clone is their voice identity — we need it regardless of
+      // whether listeners also have cloning on (CASE 3).
+      const anyListenerCloningOff = joined.some(p => !p.voiceCloningEnabled); // kept for legacy ref
       const currentCloneId = getClonedVoiceId(socket.id);
       const canClone =
         senderCloningEnabled &&
-        anyListenerCloningOff &&
         !currentCloneId &&
         !isVoiceLimitReached(socket.id);
 
@@ -1128,15 +1196,21 @@ export function initSocket(httpServer) {
         // Read cloneVoiceId after potential clone completion above
         const freshCloneId = getClonedVoiceId(socket.id);
 
-        // ── Per-listener cloning decision (4-case matrix) ────────────────────
+        // ── Per-listener routing + cloning decision ──────────────────────────
+        // CASE 1 (sender ON, listener OFF) + CASE 3 (both ON): use sender's clone.
+        // CASE 2 (sender OFF, listener ON) + CASE 4 (both OFF): Google TTS.
+        // hearLang is guaranteed non-null here (filtered above).
         const listenerMeta = joined.map(r => {
           const listenerCloningEnabled = !!r.voiceCloningEnabled;
-          // CASE 1 only: sender ON, listener OFF, voice ready, limit not hit
           const useClonedVoice =
             senderCloningEnabled &&
-            !listenerCloningEnabled &&
             !!freshCloneId &&
             !isVoiceLimitReached(socket.id);
+          const needsTranslation = speakLang !== r.hearLang;
+          console.log(
+            `[Route] ${senderId}(${speakLang}) → ${r.userId}(${r.hearLang}) | ` +
+            `translate=${needsTranslation} clone=${useClonedVoice}`,
+          );
           return { ...r, listenerCloningEnabled, useClonedVoice };
         });
 
@@ -1289,9 +1363,16 @@ export function initSocket(httpServer) {
     socket.on('disconnect', () => {
       const userId = socket.data.userId;
       if (userId) {
-        unregisterUser(userId);
+        // Only unregister if THIS socket is still the current one for this userId.
+        // Guard against the reconnect race: new socket registers → old disconnect
+        // fires → would wrongly delete the new registration.
+        if (getSocketIdForUser(userId) === socket.id) {
+          unregisterUser(userId);
+          io.emit('getOnlineUser', getOnlineUserIds());
+        }
         removeDiscoverableUser(userId);
-        io.emit('getOnlineUser', getOnlineUserIds());
+        // Clean up any pending outbound call this user initiated
+        pendingCalls.delete(userId);
       }
       // Clean up pipeline state maps so stale entries don't block future connections
       sttInFlight.delete(socket.id);

@@ -206,6 +206,15 @@ export default function App() {
   const [callInviteSpeakLang, setCallInviteSpeakLang] = useState('UR');
   const [callInviteHearLang, setCallInviteHearLang] = useState('EN');
 
+  // Refs for values read inside socket event handlers.
+  // Using refs prevents the entire useEffect from re-running (and tearing down /
+  // re-registering ALL socket listeners) on every state change.
+  const incomingCallRef = React.useRef<{ callerName: string; callerId: string } | null>(null);
+  const callInviteSpeakLangRef = React.useRef('UR');
+  const callInviteHearLangRef  = React.useRef('EN');
+  const speakLangRef2 = React.useRef('UR'); // separate from the existing speakLangRef above
+  const hearLangRef2  = React.useRef('EN');
+
   // Inline lang pickers for the meeting invite popup
   const [meetingInviteSpeakLang, setMeetingInviteSpeakLang] = useState('UR');
   const [meetingInviteHearLang, setMeetingInviteHearLang] = useState('EN');
@@ -224,6 +233,13 @@ export default function App() {
   const [liveTranscript, setLiveTranscript] = useState<Record<number, string>>({});
   // State for Incoming Call Popup
   const [incomingCall, setIncomingCall] = useState<{callerName: string, callerId: string} | null>(null);
+
+  // Sync call-handler refs every render so stale closures never read old values
+  incomingCallRef.current        = incomingCall;
+  callInviteSpeakLangRef.current = callInviteSpeakLang;
+  callInviteHearLangRef.current  = callInviteHearLang;
+  speakLangRef2.current          = speakLang;
+  hearLangRef2.current           = hearLang;
 
   useEffect(() => {
     let interval: any;
@@ -247,8 +263,10 @@ export default function App() {
 
     const onIncomingCall = ({ callerId, callerName }: { callerId: string; callerName: string }) => {
       setIncomingCall({ callerId, callerName });
-      setCallInviteSpeakLang(speakLang);
-      setCallInviteHearLang(hearLang);
+      // Pre-populate popup pickers with current speak/hear prefs via refs
+      setCallInviteSpeakLang(speakLangRef2.current);
+      setCallInviteHearLang(hearLangRef2.current);
+      console.log(`[Call] incoming-call from ${callerId} (${callerName})`);
     };
 
     const onCallAccepted = ({
@@ -266,11 +284,19 @@ export default function App() {
     }) => {
       setRoomId(rid);
 
-      // incomingCall being set means we are the callee; use popup-selected langs.
+      // Read CURRENT values via refs — never stale regardless of when the event fires.
+      // incomingCallRef.current being set means we are the callee; use popup langs.
       // Otherwise we are the caller; use the setup-screen langs.
-      const mySpeakLang = incomingCall ? callInviteSpeakLang : speakLang;
-      const myHearLang = incomingCall ? callInviteHearLang : hearLang;
-      
+      const isCallee = !!incomingCallRef.current;
+      const mySpeakLang = isCallee ? callInviteSpeakLangRef.current : speakLangRef2.current;
+      const myHearLang  = isCallee ? callInviteHearLangRef.current  : hearLangRef2.current;
+
+      console.log(
+        `[Call] call-accepted | role=${isCallee ? 'callee' : 'caller'} ` +
+        `me=${user?.userId}(${mySpeakLang}→${myHearLang}) ` +
+        `peer=${peerUserId}(${peerSpeakLang}→${peerHearLang}) roomId=${rid}`,
+      );
+
       setActiveConfig([
         { visitorId: user?._id, visitorUserId: user?.userId, userId: user?.userId, speak: mySpeakLang, hear: myHearLang },
         { visitorId: peerOdId || null, visitorUserId: peerUserId, userId: peerUserId, speak: peerSpeakLang, hear: peerHearLang },
@@ -450,7 +476,11 @@ export default function App() {
       socket.off('clone-ready',   onCloneReady);
       socket.off('clone-failed',  onCloneFailed); // maps to 'using-original' state
     };
-  }, [socket, user, speakLang, hearLang, incomingCall, callInviteSpeakLang, callInviteHearLang, stopRecording, stopListening, stopAudio]);
+  // Only stable references remain — no volatile state values that would cause
+  // full listener teardown/re-registration on every render.
+  // speakLang, hearLang, incomingCall, callInviteSpeakLang, callInviteHearLang
+  // are all read via refs inside the handlers above.
+  }, [socket, user, stopRecording, stopListening, stopAudio]);
 
   // ── Discoverable mode: emit start/stop based on screen ───────────────────
   useEffect(() => {
@@ -1078,10 +1108,11 @@ export default function App() {
                       }
                       warmUpAudio(); // pre-create AudioContext in user-gesture frame
                       const generatedMeetingId = `mt_${user?.userId}_${Date.now()}`;
-                      const invitees = ids.slice(0, participants - 1).map(uid => ({
+                      // Each invitee owns their own speakLang / hearLang.
+                      // The host MUST NOT assign languages to others.
+                      // Invitees send their own languages when they emit join-meeting.
+                      const invitees = ids.slice(0, participants - 1).map((uid: string) => ({
                         userId: uid,
-                        speakLang: hearLang,
-                        hearLang: speakLang,
                       }));
                       socket?.emit('create-meeting', {
                         meetingId: generatedMeetingId,
