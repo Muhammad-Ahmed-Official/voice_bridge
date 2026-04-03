@@ -379,6 +379,8 @@ export function initSocket(httpServer) {
         speakLang,
         hearLang,
         callerSocketId: socket.id,
+        odId: socket.data.odId || null,
+        callerName: callerName || socket.data.userId,
       });
       console.log(`[Call] pending: ${socket.data.userId} → ${targetUserId} | speak=${speakLang} hear=${hearLang}`);
 
@@ -437,7 +439,7 @@ export function initSocket(httpServer) {
 
       const userA = {
         socketId:            callerSocketId,
-        odId:                callerSocket?.data.odId || null,
+        odId:                pending.odId || null,
         userId:              callerId,
         speakLang:           rawSpeakA,   // validated — no silent fallback
         hearLang:            rawHearA,    // validated — no silent fallback
