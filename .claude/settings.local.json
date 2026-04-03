@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(find D:/Client/FYPS/voice_bridge/frontend -name *.tsx ! -path */node_modules/*)",
-      "Bash(grep -n \"|| ''EN''\\\\||| ''UR''\\\\|ELEVENLABS_DEFAULT_VOICE_ID,\" backend/src/socket/index.js backend/src/services/tts.js)"
+      "Bash(grep -n \"|| ''EN''\\\\||| ''UR''\\\\|ELEVENLABS_DEFAULT_VOICE_ID,\" backend/src/socket/index.js backend/src/services/tts.js)",
+      "Bash(xargs grep:*)"
     ]
   }
 }

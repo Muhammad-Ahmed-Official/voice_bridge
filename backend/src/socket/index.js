@@ -899,6 +899,94 @@ export function initSocket(httpServer) {
       console.log(`[Meeting] ${userId} declined meeting ${meetingId}`);
     });
 
+    // ── join-meeting ──────────────────────────────────────────────────────────
+    socket.on('join-meeting', async ({ meetingId, speakLang, hearLang }) => {
+      const userId = socket.data.userId;
+
+      if (!userId) {
+        socket.emit('meeting-error', { message: 'Not registered.' });
+        return;
+      }
+
+      if (!VALID_LANGS.has(speakLang) || !VALID_LANGS.has(hearLang)) {
+        socket.emit('meeting-error', {
+          message: `Invalid language configuration (speakLang=${speakLang}, hearLang=${hearLang}). Expected: UR | EN | AR`,
+        });
+        console.warn(`[Meeting] join-meeting: ${userId} sent invalid langs speak=${speakLang} hear=${hearLang}`);
+        return;
+      }
+
+      const room = getMeeting(meetingId);
+      if (!room) {
+        socket.emit('meeting-error', { message: 'Meeting not found or has already ended.' });
+        console.warn(`[Meeting] join-meeting: meeting ${meetingId} not found (user: ${userId})`);
+        return;
+      }
+
+      const entry = room.participants.get(userId);
+      if (!entry || entry.status !== 'invited') {
+        socket.emit('meeting-error', { message: 'You are not invited to this meeting.' });
+        console.warn(`[Meeting] join-meeting: ${userId} not eligible for ${meetingId} (status: ${entry?.status ?? 'not found'})`);
+        return;
+      }
+
+      // Promote participant from 'invited' → 'joined' and bind their live socket
+      participantJoined(meetingId, userId, socket.id, speakLang, hearLang);
+      console.log(`[Meeting] ${userId} joined meeting ${meetingId} → socketId: ${socket.id}`);
+
+      // ── Voice Cloning: init buffer if user has it enabled ─────────────────
+      try {
+        const userDoc = await User.findOne({ userId }).lean();
+        const cloningEnabled = !!userDoc?.voiceCloningEnabled;
+
+        // Persist flag on the live participant entry so audio handlers can read it
+        const freshEntry = room.participants.get(userId);
+        if (freshEntry) freshEntry.voiceCloningEnabled = cloningEnabled;
+
+        if (cloningEnabled) {
+          const existingVoiceId =
+            typeof userDoc?.voiceId === 'string' && userDoc.voiceId.length > 0
+              ? userDoc.voiceId
+              : null;
+          initCloneBuffer(socket.id, userId, existingVoiceId);
+          if (existingVoiceId) {
+            socket.emit('clone-ready', { status: 'ready', voiceId: existingVoiceId, message: 'Using your saved cloned voice.' });
+          } else {
+            socket.emit('clone-started', { status: 'buffering', message: 'Recording your voice for cloning…' });
+          }
+        }
+      } catch (cloneInitErr) {
+        // Non-fatal — meeting still proceeds with default TTS
+        console.warn('[VoiceClone] Meeting join — could not init clone buffer:', cloneInitErr.message);
+      }
+
+      // Build a full config snapshot for every client to sync on
+      const updatedConfig = getAllParticipantEntries(meetingId).map(e => ({
+        userId: e.userId, speak: e.speakLang, hear: e.hearLang, status: e.status,
+      }));
+
+      // Ack to the participant who just joined
+      socket.emit('meeting-joined-ack', { meetingId, config: updatedConfig });
+
+      // Notify all participants who are already in the meeting (host + earlier joiners)
+      const alreadyJoined = getJoinedParticipants(meetingId).filter(p => p.socketId !== socket.id);
+      alreadyJoined.forEach(p => {
+        console.log(`[Meeting] notifying ${p.userId} (${p.socketId}) that ${userId} joined`);
+        io.to(p.socketId).emit('meeting-participant-joined', {
+          meetingId,
+          userId,
+          speakLang,
+          hearLang,
+          updatedConfig,
+        });
+      });
+
+      console.log(
+        `[Meeting] state after ${userId} joined: ` +
+        updatedConfig.map(e => `${e.userId}(${e.status})`).join(', '),
+      );
+    });
+
     // ── meeting-speech-text → translate → all joined peers ───────────────────
     socket.on('meeting-speech-text', async ({ meetingId, text }) => {
       const room = getMeeting(meetingId);
