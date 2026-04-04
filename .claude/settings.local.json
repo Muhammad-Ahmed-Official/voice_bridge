@@ -7,7 +7,8 @@
       "Bash(node --input-type=module --eval \"import\\('./src/socket/index.js'\\).then\\(\\(\\)=>console.log\\('OK'\\)\\).catch\\(e=>console.error\\('ERR:',e.message\\)\\)\")",
       "Bash(npx tsc:*)",
       "Bash(node --input-type=module --eval \"import\\('./src/socket/index.js'\\).then\\(\\(\\)=>console.log\\('backend OK'\\)\\).catch\\(e=>console.error\\('ERR:',e.message\\)\\)\")",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(grep:*)"
     ]
   }
 }
