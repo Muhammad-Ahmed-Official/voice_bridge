@@ -622,7 +622,7 @@ export function initSocket(httpServer) {
         !cloneState?.voiceLimitReached;
 
       if (canClone) {
-        const cloneState = getCloneState(socket.id);
+        // cloneState was already fetched above — reuse it, do not re-fetch.
         if (cloneState?.status === 'buffering' && audioBase64) {
           const readyToClone = addChunkToCloneBuffer(socket.id, audioBase64, mimeType);
 
@@ -630,9 +630,18 @@ export function initSocket(httpServer) {
             // Async — do not block the audio pipeline
             performVoiceClone(socket.id)
               .then((voiceId) => {
-                if (voiceId) {
-                  clearCloneBuffer(socket.id);
-                }
+                // Do NOT call clearCloneBuffer here.
+                // performVoiceClone already set state.status='ready' and state.voiceId=voiceId.
+                // That state entry MUST stay in cloneBuffers so resolveAudioStrategy can read
+                // the voiceId on every subsequent audio-chunk.  clearCloneBuffer would nuke it,
+                // making getClonedVoiceId return null and dropping the cloned voice for the
+                // rest of the call.  The buffer is cleaned up at end-call instead.
+                //
+                // Free the raw audio chunks though — they're no longer needed and could be
+                // several MB in memory.
+                const liveState = getCloneState(socket.id);
+                if (liveState) liveState.chunks = [];
+
                 socket.emit('clone-ready', {
                   status:  'ready',
                   voiceId,
