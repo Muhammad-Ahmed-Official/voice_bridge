@@ -8,7 +8,9 @@
       "Bash(npx tsc:*)",
       "Bash(node --input-type=module --eval \"import\\('./src/socket/index.js'\\).then\\(\\(\\)=>console.log\\('backend OK'\\)\\).catch\\(e=>console.error\\('ERR:',e.message\\)\\)\")",
       "Bash(node:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cd frontend:*)",
+      "Bash(taskkill //F //IM node.exe)"
     ]
   }
 }

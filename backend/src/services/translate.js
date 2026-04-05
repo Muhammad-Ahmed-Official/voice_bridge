@@ -48,13 +48,16 @@ function getTranslateClient() {
         keyFilename
       });
       console.log('[Translate] Initialized with service account credentials (GOOGLE_APPLICATION_CREDENTIALS)');
-    } else if (process.env.GOOGLE_API_KEY) {
-      translateClient = new v2.Translate({
-        key: process.env.GOOGLE_API_KEY
-      });
-      console.log('[Translate] Initialized with API key');
     } else {
-      throw new Error('No Google Cloud credentials configured. Set GOOGLE_CREDENTIALS_JSON, GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_API_KEY');
+      // Use dedicated Translation API key, fallback to general key
+      const apiKey = process.env.GOOGLE_API_KEY_TRANSLATION || process.env.GOOGLE_API_KEY;
+      if (!apiKey) {
+        throw new Error('No Google Cloud credentials configured. Set GOOGLE_CREDENTIALS_JSON, GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_API_KEY_TRANSLATION, or GOOGLE_API_KEY');
+      }
+      translateClient = new v2.Translate({
+        key: apiKey
+      });
+      console.log('[Translate] Initialized with API key (GOOGLE_API_KEY_TRANSLATION)');
     }
   }
   return translateClient;

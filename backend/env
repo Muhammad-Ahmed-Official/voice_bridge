@@ -1,0 +1,6 @@
+ALLOWED_ORIGIN="http://localhost:8081"
+MONGO_URI=mongodb+srv://ahmedanis4546:Mongo12345@cluster0.tvtr7.mongodb.net
+GOOGLE_API_KEY=AIzaSyBErjsXcxDXPZfNXtVBpqKFXehvXYcvDNo
+GOOGLE_CREDENTIALS_JSON=./service-account.json
+ELEVENLABS_API_KEY=sk_c5bbd08b0745e1b91bce4546c29438e065b5393ff84d4a2f
+ELEVENLABS_VOICE_ID=vZzlAds9NzvLsFSWp0qk

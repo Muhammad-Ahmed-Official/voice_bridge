@@ -5,10 +5,10 @@ import { translateText } from './translate.js';
 const GOOGLE_STT_URL = 'https://speech.googleapis.com/v1/speech:recognize';
 
 const ENCODING_MAP = {
-  'audio/webm':               { encoding: 'WEBM_OPUS' },
-  'audio/webm;codecs=opus':   { encoding: 'WEBM_OPUS' },
-  'audio/ogg':                { encoding: 'OGG_OPUS' },
-  'audio/ogg;codecs=opus':    { encoding: 'OGG_OPUS' },
+  'audio/webm':               { encoding: 'WEBM_OPUS', sampleRateHertz: 16000 },
+  'audio/webm;codecs=opus':   { encoding: 'WEBM_OPUS', sampleRateHertz: 16000 },
+  'audio/ogg':                { encoding: 'OGG_OPUS', sampleRateHertz: 16000 },
+  'audio/ogg;codecs=opus':    { encoding: 'OGG_OPUS', sampleRateHertz: 16000 },
   'audio/l16':                { encoding: 'LINEAR16', sampleRateHertz: 16000 },
   'audio/l16;rate=16000':     { encoding: 'LINEAR16', sampleRateHertz: 16000 },
   'audio/wav':                { encoding: 'LINEAR16', sampleRateHertz: 16000 },
@@ -113,9 +113,10 @@ export async function transcribeAudio(
   mimeType = 'audio/webm;codecs=opus',
   options,
 ) {
-  const apiKey = process.env.GOOGLE_API_KEY;
+  // Use dedicated STT API key, fallback to general key
+  const apiKey = process.env.GOOGLE_API_KEY_STT || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
-    throw new Error('GOOGLE_API_KEY is not set in backend/.env');
+    throw new Error('GOOGLE_API_KEY_STT or GOOGLE_API_KEY is not set in backend/.env');
   }
 
   const isFallback = options?.isFallback === true;
